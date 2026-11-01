@@ -1,8 +1,8 @@
 # Changelog
 
 ## 0.2.3 (2026-11-01)
-- Documented that default skipped directories and over-size files are not scanned and can still be published (for example GitHub Pages serving `docs/`, `dist/` or `build/`).
-- Added optional `skip_dirs` and `max_file_bytes` keys in `portfolioguard.toml` so repositories can re-enable scanning for those paths or raise the size cap. `--max-bytes` still overrides the size when set on the command line.
+- Spelled out that skipped folders and over-size files are not scanned and can still go live (e.g. GitHub Pages serving `docs/`, `dist/` or `build/`).
+- Optional `skip_dirs` and `max_file_bytes` in `portfolioguard.toml` if you need to scan those paths or raise the size cap. `--max-bytes` on the CLI still wins when you set it.
 
 
 ## 0.2.2 (2026-11-01)
