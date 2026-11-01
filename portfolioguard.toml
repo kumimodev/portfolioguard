@@ -6,7 +6,7 @@
 # Optional scan limits (override built-in defaults when set).
 # skip_dirs replaces the default skipped directory names entirely.
 # Default skipped names: .git, node_modules, dist, build, .venv, venv, __pycache__, .idea, .vscode
-# Example — keep most defaults but scan dist/ and build/ (e.g. before GitHub Pages publish):
+# Example: keep most defaults but scan dist/ and build/ (e.g. before GitHub Pages publish):
 # skip_dirs = [".git", "node_modules", ".venv", "venv", "__pycache__", ".idea", ".vscode"]
 # max_file_bytes raises the size cap (default 1000000). CLI --max-bytes overrides this when set.
 # max_file_bytes = 2000000
