@@ -1,0 +1,5 @@
+# Intentional obviously-fake unit-test fixtures only. Never add real secrets here.
+test_portfolioguard.py:aws_access_key
+test_portfolioguard.py:email_address
+test_portfolioguard.py:phone_number
+test_portfolioguard.py:generic_secret_assignment

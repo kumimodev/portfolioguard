@@ -1,0 +1,73 @@
+# PortfolioGuard
+
+**Version: 0.2.0**: adds allowlisting, JSON output and a pre-push hook installer.
+
+PortfolioGuard is an offline Python pre-push scanner for likely secrets and personal data in a Git repository. It scans files locally and reports locations and rule names only. matched text is never included in output. It helps with review but is **not a guarantee** that sensitive data will be found or that a clean scan means a repository is safe. PortfolioGuard is offline only and does not connect to a network.
+
+## Requirements
+
+Python 3.11+ and Git.
+
+## Run a scan
+
+Run the script by its local path from the repository you want to scan:
+```sh
+python /path/to/PortfolioGuard/portfolioguard.py .            # working tree
+python /path/to/PortfolioGuard/portfolioguard.py . --staged    # staged contents
+python /path/to/PortfolioGuard/portfolioguard.py . --history   # reachable Git history
+```
+
+Working-tree mode checks tracked and untracked files not ignored by Git. Staged mode checks staged file contents. History mode checks files in every reachable commit and may take time on large repositories. Common generated/dependency directories and files over 2 MB are skipped.
+
+Exit codes: `0` means no non-allowlisted findings, `1` means one or more findings need review, and `2` means the scan or requested operation could not run.
+
+## Allowlist
+
+By default, `.portfolioguard-allowlist` in the repository root is loaded if present. Use `--allowlist PATH` to choose another file. Blank lines and lines beginning with `#` are ignored. Entries are either:
+
+- Exact finding: `path:line:rule`, for example `src/example.txt:12:email_address`.
+- Path glob plus rule: `path-pattern:rule`, for example `docs/*.md:email_address` (matches any line in matching paths).
+
+Paths are relative to the repository root and use `/` separators. Rule names are the labels printed by PortfolioGuard. Review findings locally before adding entries. allowlisted findings do not cause exit code 1. This repository ships a `.portfolioguard-allowlist` that covers the deliberately fake fixtures in `test_portfolioguard.py` so a self-scan stays clean.
+
+Use `--candidates` to print candidate entries from the current scan. This prints paths, line numbers and rule names only, never matched text:
+```sh
+python /path/to/PortfolioGuard/portfolioguard.py . --candidates
+```
+
+## Pre-push hook
+
+From a Git repository, run:
+```sh
+python /path/to/PortfolioGuard/portfolioguard.py --install-hook
+```
+
+The installed hook runs a staged scan, stays offline, and blocks a push when non-allowlisted findings remain. Existing hooks are preserved unless `--force` is supplied. `--force` backs up the previous hook beside it as `pre-push.portfolioguard.bak` (with a numeric suffix if needed) before replacement.
+
+## JSON output
+
+Use `--format json` for a JSON array containing `source`, `path`, `line`, `rule` and `allowed` fields. Matched text is never included.
+```sh
+python /path/to/PortfolioGuard/portfolioguard.py . --format json
+```
+
+## Custom rules
+
+`portfolioguard.toml` may contain additive `[[rules]]` entries with `name` and regular-expression `pattern` fields. Pass another file with `--rules PATH`. Do not put real credentials or personal data in the config.
+
+## Demo
+
+The following uses deliberately fake fixture values:
+```text
+$ python portfolioguard.py .
+working-tree: sample.txt:1 [generic_secret_assignment]
+working-tree: sample.txt:2 [email_address]
+
+Found 2 non-allowlisted issue(s) across 2 finding(s). Review locally before sharing.
+$ echo $?
+1
+```
+
+## Version history
+
+See [CHANGELOG.md](CHANGELOG.md).

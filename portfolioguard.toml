@@ -1,0 +1,4 @@
+# Optional custom rules are additive to built-ins.
+# [[rules]]
+# name = "internal_identifier"
+# pattern = "\\bINTERNAL-[0-9]{5}\\b"
