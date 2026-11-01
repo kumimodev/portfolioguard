@@ -2,7 +2,7 @@
 
 **Version: 0.2.3**: clearer warning about skipped folders, plus `skip_dirs` / `max_file_bytes` in `portfolioguard.toml`.
 
-Offline Python helper that looks through a Git repo for things that look like secrets or personal data before you push. It runs on your machine only: no network: and prints the file, line and rule name. It never prints the matched text itself. Useful as a second look, but a clean run is **not** a guarantee that nothing sensitive is in there.
+Offline Python helper that looks through a Git repo for things that look like secrets or personal data before you push. It runs on your machine only (no network) and prints the file, line and rule name. It never prints the matched text itself. Useful as a second look, but a clean run is **not** a guarantee that nothing sensitive is in there.
 
 ## Requirements
 
@@ -52,7 +52,7 @@ If `.portfolioguard-allowlist` exists at the repo root, it gets loaded. Use `--a
 
 Paths are relative to the repo root with `/` separators. Rule names are whatever PortfolioGuard prints. Have a look at findings yourself before allowlisting them. Allowlisted ones don't trip exit code 1. This repo ships an allowlist for the deliberately fake fixtures in `test_portfolioguard.py` so a self-scan stays quiet.
 
-`--candidates` prints candidate allowlist lines from the current scan (paths, lines and rules only: never the matched text):
+`--candidates` prints candidate allowlist lines from the current scan (paths, lines and rules only, never the matched text):
 ```sh
 python /path/to/PortfolioGuard/portfolioguard.py . --candidates
 ```
