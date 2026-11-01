@@ -1,5 +1,13 @@
 # Changelog
 
+## 0.3.0, 1 Nov 2026
+- Added a GitHub Action workflow that runs unit tests plus working tree and history scans on push and pull requests (covers setups where the pre-push hook never fires).
+- Detect Malaysian MyKad numbers in dashed `YYMMDD-PB-####` or 12 digit form, with valid month/day and JPN birthplace codes. Dashless matches need a nearby IC or MyKad style keyword.
+- Tightened Slack token matching and added Slack incoming webhooks, Discord bot tokens and webhook URLs, and Stripe secret or restricted keys (live and test).
+- Expanded unit tests for the new rules (positives, invalid dates or PB codes, and digits inside longer numbers).
+- Documented the Action, how to reuse it, and the new rules.
+
+
 ## 0.2.3, 1 Nov 2026
 - Spelled out that skipped folders and over-size files are not scanned and can still go live (e.g. GitHub Pages serving `docs/`, `dist/` or `build/`).
 - Optional `skip_dirs` and `max_file_bytes` in `portfolioguard.toml` if you need to scan those paths or raise the size cap. `--max-bytes` on the CLI still wins when you set it.

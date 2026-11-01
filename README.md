@@ -2,7 +2,7 @@
 
 # PortfolioGuard
 
-**Version: 0.2.3**: clearer warning about skipped folders, plus `skip_dirs` / `max_file_bytes` in `portfolioguard.toml`.
+**Version: 0.3.0**: GitHub Action for push and PR scans, Malaysian MyKad detection, plus tighter Slack, Discord and Stripe rules.
 
 Offline Python helper that looks through a Git repo for things that look like secrets or personal data before you push. It runs on your machine only (no network) and prints the file, line and rule name. It never prints the matched text itself. Useful as a second look, but a clean run is **not** a guarantee that nothing sensitive is in there.
 
@@ -59,6 +59,12 @@ Paths are relative to the repo root with `/` separators. Rule names are whatever
 python /path/to/PortfolioGuard/portfolioguard.py . --candidates
 ```
 
+## GitHub Action
+
+If a pre-push hook never runs (cloud agents with a custom `core.hooksPath`, or anyone who pushes from a machine without the hook installed), add the workflow that ships in `.github/workflows/portfolioguard.yml`. It runs on every push and pull request, checks out with `fetch-depth: 0`, sets up Python, runs the unit tests, then scans the working tree and reachable history. The job fails on findings. Permissions stay at `contents: read` and no secrets are used.
+
+Copy that workflow into another repo, or point a reusable workflow at this file once you publish one. Keep `portfolioguard.py`, the tests, and `.portfolioguard-allowlist` available to the job (same repo, or check them out beside the workflow).
+
 ## Pre-push hook
 
 From a Git repo:
@@ -79,7 +85,7 @@ python /path/to/PortfolioGuard/portfolioguard.py . --format json
 
 `portfolioguard.toml` can hold extra `[[rules]]` with `name` and regex `pattern`, plus optional top-level `skip_dirs` (list of directory name strings) and `max_file_bytes` (integer). Loaded from the repo root if present, otherwise from next to `portfolioguard.py`. `--rules PATH` picks a different file instead. Built-in rules always stay on. Don't put real secrets or personal data in the config.
 
-Built-ins cover private keys, AWS and GitHub credentials, OpenAI `sk-` keys, Slack `xox…` / `xapp-` tokens, Azure account keys and shared access signatures, common secret assignments (including quoted JSON keys and compound env names), emails, phone numbers, and Singapore-style NRIC/FIN. Azure protocol-only docs don't match. NRIC/FIN needs a valid checksum and proper boundaries.
+Built-ins cover private keys, AWS and GitHub credentials, OpenAI secret keys, Slack bot and app tokens plus Slack incoming webhooks, Discord bot tokens and webhook URLs, Stripe secret and restricted keys (live and test), Azure account keys and shared access signatures, common secret assignments (including quoted JSON keys and compound env names), emails, phone numbers, Singapore-style NRIC/FIN, and Malaysian MyKad numbers (dashed or 12 digit, with a real date and JPN birthplace code). Azure protocol-only docs don't match. NRIC/FIN needs a valid checksum and proper boundaries. Dashless MyKad matches stay quieter and want a nearby IC or MyKad style keyword on the line.
 
 Hook install quotes the interpreter and script paths with `shlex.quote`, so spaces and quotes in the path are fine.
 

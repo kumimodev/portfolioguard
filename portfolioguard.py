@@ -9,7 +9,7 @@ import subprocess
 import sys
 from pathlib import Path
 
-VERSION = "0.2.3"
+VERSION = "0.3.0"
 LIMIT = 1_000_000
 SKIP = {'.git', 'node_modules', 'dist', 'build', '.venv', 'venv', '__pycache__', '.idea', '.vscode'}
 
