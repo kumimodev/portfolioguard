@@ -175,6 +175,38 @@ class ScannerTests(unittest.TestCase):
             self.assertNotIn('test-secret-value', result.stdout.decode() + result.stderr.decode())
             self.assertNotEqual(subprocess.run(['git', '--git-dir', str(bare), 'show-ref'], stdout=subprocess.PIPE).returncode, 0)
 
+    def test_toml_skip_dirs_and_max_file_bytes(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            subprocess.run(['git', 'init', '-q', str(root)], check=True)
+            (root / 'dist').mkdir()
+            (root / 'dist' / 'bundle.js').write_text('password="test-secret-value"\n')
+            # Default skip would ignore dist/; override omits dist so the secret is found.
+            (root / 'portfolioguard.toml').write_text(
+                'skip_dirs = [".git", "node_modules", ".venv", "venv", "__pycache__", ".idea", ".vscode"]\n'
+                'max_file_bytes = 50\n'
+            )
+            output = io.StringIO()
+            with contextlib.redirect_stdout(output):
+                code = main([str(root)])
+            self.assertEqual(code, 1)
+            self.assertIn('dist/bundle.js', output.getvalue())
+            # File larger than max_file_bytes is skipped even when not under a skipped dir.
+            (root / 'big.txt').write_text(('password="another-secret-value"\n' + ('x' * 80)))
+            output2 = io.StringIO()
+            with contextlib.redirect_stdout(output2):
+                code2 = main([str(root)])
+            self.assertEqual(code2, 1)
+            self.assertNotIn('big.txt', output2.getvalue())
+            # CLI --max-bytes overrides toml and still finds the dist secret; raise enough for big.txt too.
+            output3 = io.StringIO()
+            with contextlib.redirect_stdout(output3):
+                code3 = main([str(root), '--max-bytes', '1000'])
+            self.assertEqual(code3, 1)
+            self.assertIn('big.txt', output3.getvalue())
+
+
+
 
 if __name__ == '__main__':
     unittest.main()

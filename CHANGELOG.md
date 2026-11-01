@@ -1,5 +1,10 @@
 # Changelog
 
+## 0.2.3 (2026-11-01)
+- Documented that default skipped directories and over-size files are not scanned and can still be published (for example GitHub Pages serving `docs/`, `dist/` or `build/`).
+- Added optional `skip_dirs` and `max_file_bytes` keys in `portfolioguard.toml` so repositories can re-enable scanning for those paths or raise the size cap. `--max-bytes` still overrides the size when set on the command line.
+
+
 ## 0.2.2 (2026-11-01)
 - Removed Azure protocol-only matches. Azure findings now require an account key or shared access signature fragment, including SAS URL signatures.
 - Narrowed NRIC/FIN matching to standalone values and validate standard S/T/F/G/M checksums.

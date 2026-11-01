@@ -1,6 +1,6 @@
 # PortfolioGuard
 
-**Version: 0.2.2**: narrows Azure and NRIC/FIN matches, quotes hook paths safely, and applies configurable scan limits.
+**Version: 0.2.3**: warns that skipped folders and over-size files can still be published, and lets `portfolioguard.toml` override `skip_dirs` and `max_file_bytes`.
 
 PortfolioGuard is an offline Python pre-push scanner for likely secrets and personal data in a Git repository. It scans files locally and reports locations and rule names only. matched text is never included in output. It helps with review but is **not a guarantee** that sensitive data will be found or that a clean scan means a repository is safe. PortfolioGuard is offline only and does not connect to a network.
 
@@ -18,9 +18,28 @@ python /path/to/PortfolioGuard/portfolioguard.py . --history   # reachable Git h
 python /path/to/PortfolioGuard/portfolioguard.py . --range BASE..HEAD # commits in a range
 ```
 
-Working-tree mode checks tracked and untracked files not ignored by Git. Staged mode checks staged file contents. History mode checks files in every reachable commit and may take time on large repositories. Directories named `.git`, `node_modules`, `dist`, `build`, `.venv`, `venv`, `__pycache__`, `.idea` and `.vscode` are skipped in every scan mode. Binary files (identified by a null byte near the start) and files larger than 1 MB are also skipped. Set a different cap with `--max-bytes BYTES` (for example, `--max-bytes 2000000`). this applies to working-tree, staged, history, range and pre-push scans.
+Working-tree mode checks tracked and untracked files not ignored by Git. Staged mode checks staged file contents. History mode checks files in every reachable commit and may take time on large repositories. By default, directories named `.git`, `node_modules`, `dist`, `build`, `.venv`, `venv`, `__pycache__`, `.idea` and `.vscode` are skipped in every scan mode. Binary files (identified by a null byte near the start) and files larger than 1 MB are also skipped. Set a different cap with `--max-bytes BYTES` (for example, `--max-bytes 2000000`). this applies to working-tree, staged, history, range and pre-push scans. The same limits can be set in `portfolioguard.toml` (see below).
 
 Exit codes: `0` means no non-allowlisted findings, `1` means one or more findings need review, and `2` means the scan or requested operation could not run.
+
+## Warning: skipped paths are not “clean”
+
+PortfolioGuard does **not** scan the default skipped directories or files over the size cap. Those paths can still be committed and published. Common examples:
+
+- GitHub Pages (or similar static hosting) serving a `/docs`, `dist` or `build` folder, or build output committed at the repository root
+- Secrets accidentally left under `node_modules`, `.venv` or other skipped trees
+- Large text dumps above the size cap that never enter the scan
+
+A clean scan therefore does **not** mean skipped or over-size content is safe. Before publishing a static site or other portfolio output that lives under a skipped name, either move it out of the skip list or raise the size cap.
+
+Override defaults in the repository’s `portfolioguard.toml` (same auto-load path as custom rules). `skip_dirs` **replaces** the built-in skip set entirely when present. `max_file_bytes` sets the size cap (CLI `--max-bytes` wins when supplied):
+```toml
+# Keep most defaults but scan dist/ and build/ before a Pages publish:
+skip_dirs = [".git", "node_modules", ".venv", "venv", "__pycache__", ".idea", ".vscode"]
+max_file_bytes = 2000000
+```
+
+Binary files (null byte in the first 8 KiB) remain unscanned even when the size cap is raised.
 
 ## Allowlist
 
@@ -52,13 +71,13 @@ Use `--format json` for a JSON array containing `source`, `path`, `line`, `rule`
 python /path/to/PortfolioGuard/portfolioguard.py . --format json
 ```
 
-## Custom rules
+## Custom rules and scan limits
 
-`portfolioguard.toml` may contain additive `[[rules]]` entries with `name` and regular-expression `pattern` fields. It is loaded automatically from the repository root, falling back to the directory containing `portfolioguard.py`. `--rules PATH` replaces that auto-selected file. built-in rules remain active in either case. Do not put real credentials or personal data in the config.
+`portfolioguard.toml` may contain additive `[[rules]]` entries with `name` and regular-expression `pattern` fields, plus optional top-level `skip_dirs` (list of directory name strings) and `max_file_bytes` (integer). It is loaded automatically from the repository root, falling back to the directory containing `portfolioguard.py`. `--rules PATH` replaces that auto-selected file. built-in rules remain active in either case. Do not put real credentials or personal data in the config.
 
 Built-in rules cover private keys, AWS and GitHub credentials, OpenAI `sk-` keys, Slack `xox…` and `xapp-` tokens, Azure account keys and shared access signatures, common secret assignments (including quoted JSON keys and compound environment names), email addresses, phone numbers and Singapore-style NRIC/FIN identifiers. Azure protocol-only documentation does not match. NRIC/FIN matches require valid checksums and standalone alphanumeric boundaries.
 
-Version 0.2.2 also quotes interpreter and script paths in installed hooks, including paths containing spaces or quotes.
+Installed hooks quote interpreter and script paths with `shlex.quote`, including paths containing spaces or quotes.
 
 ## Demo
 

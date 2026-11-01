@@ -9,7 +9,7 @@ import subprocess
 import sys
 from pathlib import Path
 
-VERSION = "0.2.2"
+VERSION = "0.2.3"
 LIMIT = 1_000_000
 SKIP = {'.git', 'node_modules', 'dist', 'build', '.venv', 'venv', '__pycache__', '.idea', '.vscode'}
 RULES = [
@@ -60,11 +60,12 @@ def is_text(data):
     return b'\0' not in data[:8192]
 
 
-def skipped(name):
-    return any(part in SKIP for part in Path(name).parts)
+def skipped(name, skip=None):
+    dirs = SKIP if skip is None else skip
+    return any(part in dirs for part in Path(name).parts)
 
 
-def working(root, rules, max_bytes=LIMIT):
+def working(root, rules, max_bytes=LIMIT, skip=None):
     r = git(root, 'ls-files', '--cached', '--others', '--exclude-standard', '-z')
     if r.returncode:
         raise ValueError('Could not list repository files')
@@ -73,7 +74,7 @@ def working(root, rules, max_bytes=LIMIT):
         if not raw:
             continue
         name = os.fsdecode(raw)
-        if skipped(name):
+        if skipped(name, skip):
             continue
         p = root / name
         try:
@@ -87,7 +88,7 @@ def working(root, rules, max_bytes=LIMIT):
     return found
 
 
-def staged(root, rules, max_bytes=LIMIT):
+def staged(root, rules, max_bytes=LIMIT, skip=None):
     r = git(root, 'diff', '--cached', '--name-only', '--diff-filter=ACMR', '-z')
     if r.returncode:
         raise ValueError('Could not list staged files')
@@ -96,7 +97,7 @@ def staged(root, rules, max_bytes=LIMIT):
         if not raw:
             continue
         name = os.fsdecode(raw)
-        if skipped(name):
+        if skipped(name, skip):
             continue
         b = git(root, 'show', f':{name}')
         if not b.returncode and len(b.stdout) <= max_bytes and is_text(b.stdout):
@@ -104,7 +105,7 @@ def staged(root, rules, max_bytes=LIMIT):
     return found
 
 
-def history(root, rules, max_bytes=LIMIT):
+def history(root, rules, max_bytes=LIMIT, skip=None):
     r = git(root, 'rev-list', '--all')
     if r.returncode:
         raise ValueError('Could not read Git history')
@@ -115,7 +116,7 @@ def history(root, rules, max_bytes=LIMIT):
             if not raw:
                 continue
             name = os.fsdecode(raw)
-            if skipped(name):
+            if skipped(name, skip):
                 continue
             b = git(root, 'show', f'{commit}:{name}')
             if not b.returncode and len(b.stdout) <= max_bytes and is_text(b.stdout):
@@ -123,7 +124,7 @@ def history(root, rules, max_bytes=LIMIT):
     return found
 
 
-def commit_range(root, revisions, rules, max_bytes=LIMIT):
+def commit_range(root, revisions, rules, max_bytes=LIMIT, skip=None):
     """Scan all blobs in commits selected by a git revision expression."""
     r = git(root, 'rev-list', *revisions)
     if r.returncode:
@@ -137,7 +138,7 @@ def commit_range(root, revisions, rules, max_bytes=LIMIT):
             if not raw:
                 continue
             name = os.fsdecode(raw)
-            if skipped(name):
+            if skipped(name, skip):
                 continue
             b = git(root, 'show', f'{commit}:{name}')
             if not b.returncode and len(b.stdout) <= max_bytes and is_text(b.stdout):
@@ -145,7 +146,7 @@ def commit_range(root, revisions, rules, max_bytes=LIMIT):
     return found
 
 
-def pre_push(root, rules, stream=None, max_bytes=LIMIT):
+def pre_push(root, rules, stream=None, max_bytes=LIMIT, skip=None):
     zeros = '0' * 40
     found = []
     for raw in (stream or sys.stdin).read().splitlines():
@@ -156,14 +157,14 @@ def pre_push(root, rules, stream=None, max_bytes=LIMIT):
         if local_sha == zeros:
             continue
         if remote_sha != zeros:
-            found += commit_range(root, [f'{remote_sha}..{local_sha}'], rules, max_bytes)
+            found += commit_range(root, [f'{remote_sha}..{local_sha}'], rules, max_bytes, skip)
         else:
             r = git(root, 'rev-list', local_sha, '--not', '--remotes')
             commits = r.stdout.decode('ascii', 'ignore').splitlines() if not r.returncode else []
             if not commits:
-                found += commit_range(root, [local_sha], rules, max_bytes)
+                found += commit_range(root, [local_sha], rules, max_bytes, skip)
             else:
-                found += commit_range(root, [local_sha, '--not', '--remotes'], rules, max_bytes)
+                found += commit_range(root, [local_sha, '--not', '--remotes'], rules, max_bytes, skip)
     return found
 
 
@@ -232,7 +233,7 @@ def main(argv=None):
     p.add_argument('--format', choices=('text', 'json'), default='text')
     p.add_argument('--install-hook', action='store_true', help='Install an offline commit-scan pre-push hook')
     p.add_argument('--force', action='store_true', help='Back up and replace an existing pre-push hook')
-    p.add_argument('--max-bytes', type=int, default=LIMIT, help=f'Maximum file size to scan (default: {LIMIT} bytes)')
+    p.add_argument('--max-bytes', type=int, default=None, help=f'Maximum file size to scan (default: {LIMIT} bytes, or max_file_bytes from portfolioguard.toml)')
     a = p.parse_args(argv)
     try:
         root = get_root(Path(a.path).resolve())
@@ -244,14 +245,24 @@ def main(argv=None):
         config = Path(a.rules).resolve() if a.rules else (root / 'portfolioguard.toml' if (root / 'portfolioguard.toml').is_file() else Path(__file__).resolve().parent / 'portfolioguard.toml')
         if a.rules and not config.is_file():
             raise ValueError(f'Rules file not found: {config}')
+        skip = None
+        max_bytes = LIMIT
         if config.is_file():
             import tomllib
             with open(config, 'rb') as f:
-                extra = tomllib.load(f).get('rules', [])
-            rules += [(x['name'], re.compile(x['pattern'])) for x in extra]
-        if a.max_bytes < 0:
-            raise ValueError('--max-bytes must be non-negative')
-        found = pre_push(root, rules, max_bytes=a.max_bytes) if a.pre_push else commit_range(root, [a.revision_range], rules, a.max_bytes) if a.revision_range else staged(root, rules, a.max_bytes) if a.staged else history(root, rules, a.max_bytes) if a.history else working(root, rules, a.max_bytes)
+                data = tomllib.load(f)
+            rules += [(x['name'], re.compile(x['pattern'])) for x in data.get('rules', [])]
+            if 'skip_dirs' in data:
+                if not isinstance(data['skip_dirs'], list) or not all(isinstance(x, str) for x in data['skip_dirs']):
+                    raise ValueError('skip_dirs must be a list of directory name strings')
+                skip = set(data['skip_dirs'])
+            if 'max_file_bytes' in data:
+                max_bytes = int(data['max_file_bytes'])
+        if a.max_bytes is not None:
+            max_bytes = a.max_bytes
+        if max_bytes < 0:
+            raise ValueError('--max-bytes / max_file_bytes must be non-negative')
+        found = pre_push(root, rules, max_bytes=max_bytes, skip=skip) if a.pre_push else commit_range(root, [a.revision_range], rules, max_bytes, skip) if a.revision_range else staged(root, rules, max_bytes, skip) if a.staged else history(root, rules, max_bytes, skip) if a.history else working(root, rules, max_bytes, skip)
         allow_path = Path(a.allowlist).resolve() if a.allowlist else root / '.portfolioguard-allowlist'
         allow_entries = load_allowlist(allow_path)
     except (OSError, ValueError, KeyError, re.error) as e:
