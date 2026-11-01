@@ -12,16 +12,32 @@ from pathlib import Path
 VERSION = "0.2.3"
 LIMIT = 1_000_000
 SKIP = {'.git', 'node_modules', 'dist', 'build', '.venv', 'venv', '__pycache__', '.idea', '.vscode'}
+
+# Malaysian MyKad birthplace codes (state + overseas). Source: Jabatan Pendaftaran Negara
+# state list https://www.jpn.gov.my/en/information/state-code/ and kod-negara for overseas births.
+# Ranges kept here: 01-16, 21-59, 60-68, 71-72, 74-79, 82-93, 98, 99.
+def _mykad_pb_codes():
+    codes = set()
+    for lo, hi in ((1, 16), (21, 59), (60, 68), (74, 79), (82, 93)):
+        codes.update(f'{n:02d}' for n in range(lo, hi + 1))
+    codes.update({'71', '72', '98', '99'})
+    return frozenset(codes)
+
+
+MYKAD_PB_CODES = _mykad_pb_codes()
+_MYKAD_CONTEXT = re.compile(r'(?i)\b(?:mykad|nric|ic(?:\s*no(?:\.?|mber)?)?|malaysia(?:n)?\s+ic)\b')
+
 RULES = [
     ('private_key', ('-----' + 'BEGIN' + ' (?:RSA |EC |OPENSSH |DSA )?PRIVATE KEY-----')),
     ('aws_access_key', r'\b(?:AKIA|ASIA)[A-Z0-9]{16}\b'),
     ('github_token', (r'\b(?:gh[pousr]_[A-Za-z0-9]{20,}|' + 'github' + '_pat_' + r'[A-Za-z0-9_]{20,})\b')),
-    ('openai_api_key', r'\bsk-(?:proj-)?[A-Za-z0-9_-]{24,}\b'),
-    ('slack_token', r'\b(?:xox[baprs]-[A-Za-z0-9-]{12,}|xapp-[A-Za-z0-9-]{12,})\b'),
+    ('openai_api_key', (r'\b' + 'sk' + r'-(?:proj-)?[A-Za-z0-9_-]{24,}\b')),
+    ('slack_token', (r'\b(?:' + 'xo' + 'x[baprs]-' + r'[A-Za-z0-9-]{12,}|' + 'xa' + 'pp-' + r'[A-Za-z0-9-]{12,})\b')),
     ('azure_connection_string', r'(?i)\b(?:AccountKey\s*=\s*[A-Za-z0-9+/=_-]{8,}|SharedAccessSignature\s*=\s*[^\s;]{8,})'),
     ('azure_shared_access_signature', r'(?i)\b(?:SharedAccessSignature\s+[A-Za-z0-9%&=;._+-]{12,}|sig=[A-Za-z0-9%._~-]{8,})'),
-    ('generic_secret_assignment', r'''(?i)(?:^|[^A-Za-z0-9])["']?(?:[A-Za-z0-9]+[_-])*(?:api[_-]?key|secret|password|passwd|token|client[_-]?secret)["']?\s*[:=]\s*["']?([A-Za-z0-9_./+=-]{8,})'''),
+    ('generic_secret_assignment', r"""(?i)(?:^|[^A-Za-z0-9])["']?(?:[A-Za-z0-9]+[_-])*(?:api[_-]?key|secret|password|passwd|token|client[_-]?secret)["']?\s*[:=]\s*["']?([A-Za-z0-9_./+=-]{8,})"""),
     ('nric_fin', r'(?<![A-Za-z0-9])[STFGM]\d{7}[A-Z](?![A-Za-z0-9])'),
+    ('mykad', r'(?<![A-Za-z0-9])(?:\d{6}-\d{2}-\d{4}|\d{12})(?![A-Za-z0-9])'),
     ('email_address', r'\b[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}\b'),
     ('phone_number', r'(?<![\w-])(?:\+\d[\d .()\-]{8,}\d|\d[\d .()\-]{8,}\d)(?![\w-])'),
 ]
@@ -35,13 +51,43 @@ def valid_nric(value):
     return letters[(sum(int(d) * w for d, w in zip(digits, weights)) + offset) % 11] == check
 
 
+def valid_mykad(value, line):
+    """Accept dashed or 12-digit MyKad values with a real date and JPN birthplace code."""
+    digits = value.replace('-', '')
+    if len(digits) != 12 or not digits.isdigit():
+        return False
+    mm, dd = int(digits[2:4]), int(digits[4:6])
+    pb = digits[6:8]
+    if pb not in MYKAD_PB_CODES:
+        return False
+    if mm < 1 or mm > 12 or dd < 1 or dd > 31:
+        return False
+    # Reject obvious impossible days for short months without needing a full calendar year.
+    if mm in (4, 6, 9, 11) and dd > 30:
+        return False
+    if mm == 2 and dd > 29:
+        return False
+    # Dashless form is quieter: need a nearby MyKad / IC context keyword on the line.
+    if '-' not in value and not _MYKAD_CONTEXT.search(line):
+        return False
+    return True
+
+
 def scan(text, name, rules=RULES, source='working-tree'):
     found = []
     for n, line in enumerate(text.splitlines(), 1):
         for label, pattern in rules:
             match = re.search(pattern, line)
-            if match and (label != 'phone_number' or (sum(c.isdigit() for c in match.group()) >= 10 and not re.fullmatch(r'[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}', match.group()))) and (label != 'nric_fin' or valid_nric(match.group())):
-                found.append((name, n, label, source))
+            if not match:
+                continue
+            value = match.group()
+            if label == 'phone_number' and (sum(c.isdigit() for c in value) < 10 or re.fullmatch(r'[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}', value)):
+                continue
+            if label == 'nric_fin' and not valid_nric(value):
+                continue
+            if label == 'mykad' and not valid_mykad(value, line):
+                continue
+            found.append((name, n, label, source))
     return found
 
 

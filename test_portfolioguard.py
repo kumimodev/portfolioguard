@@ -8,7 +8,7 @@ from unittest.mock import patch
 import shlex
 from pathlib import Path
 
-from portfolioguard import RULES, install_hook, is_allowed, load_allowlist, main, scan
+from portfolioguard import install_hook, is_allowed, load_allowlist, main, scan
 
 
 def run_git(root, *args, **kwargs):
@@ -35,13 +35,13 @@ class ScannerTests(unittest.TestCase):
 
     def test_new_secret_rules(self):
         samples = [
-            ('key=' + 'sk-' + 'proj-' + 'EXAMPLEEXAMPLEEXAMPLEEXAMPLEexample', 'openai_api_key'),
-            ('key=' + 'sk-' + 'exampleexampleexampleexample1234', 'openai_api_key'),
+            ('key=' + 'sk' + '-' + 'proj-' + 'EXAMPLEEXAMPLEEXAMPLEEXAMPLEexample', 'openai_api_key'),
+            ('key=' + 'sk' + '-' + 'exampleexampleexampleexample1234', 'openai_api_key'),
             ('token=' + 'xox' + 'b-' + '123456789012-123456789012-EXAMPLEexampleExample12', 'slack_token'),
             ('token=' + 'xapp-' + '1-EXAMPLEEXAMPLEEX-abcdefgh', 'slack_token'),
             ('DefaultEndpointsProtocol=https;AccountName=examplestorage;AccountKey=EXAMPLEbase64+/key==;EndpointSuffix=core.windows.net', 'azure_connection_string'),
             ('{"password": "test-secret-value"}', 'generic_secret_assignment'),
-            ('OPENAI_API_KEY=' + 'sk-' + 'exampleexampleexampleexample1234', 'generic_secret_assignment'),
+            ('OPENAI_API_KEY=' + 'sk' + '-' + 'exampleexampleexampleexample1234', 'generic_secret_assignment'),
             ('slack_token=EXAMPLEfake-token-value', 'generic_secret_assignment'),
             ('S0000000J', 'nric_fin'),
             ('T0000000G', 'nric_fin'),
@@ -205,6 +205,34 @@ class ScannerTests(unittest.TestCase):
             self.assertEqual(code3, 1)
             self.assertIn('big.txt', output3.getvalue())
 
+    def test_mykad_positive_and_negative(self):
+        # Build fixtures from pieces so blobs never hold a full person-looking IC.
+        dashed = '90' + '01' + '01' + '-' + '14' + '-' + '567' + '1'
+        self.assertIn('mykad', {x[2] for x in scan('ic ' + dashed, 'fixture')})
+        self.assertIn('mykad', {x[2] for x in scan(dashed, 'fixture')})
+        compact = '90' + '01' + '01' + '14' + '567' + '1'
+        self.assertIn('mykad', {x[2] for x in scan('MyKad ' + compact, 'fixture')})
+        self.assertIn('mykad', {x[2] for x in scan('IC No: ' + compact, 'fixture')})
+        # Dashless without context stays quiet.
+        self.assertNotIn('mykad', {x[2] for x in scan(compact, 'fixture')})
+        # Invalid month / day.
+        bad_month = '90' + '13' + '01' + '-' + '14' + '-' + '567' + '1'
+        bad_day = '90' + '01' + '32' + '-' + '14' + '-' + '567' + '1'
+        bad_apr = '90' + '04' + '31' + '-' + '14' + '-' + '567' + '1'
+        bad_feb = '90' + '02' + '30' + '-' + '14' + '-' + '567' + '1'
+        for value in (bad_month, bad_day, bad_apr, bad_feb):
+            with self.subTest(value=value):
+                self.assertNotIn('mykad', {x[2] for x in scan(value, 'fixture')})
+        # Invalid PB codes (17-20 and 00 are outside the JPN ranges we accept).
+        bad_pb = '90' + '01' + '01' + '-' + '17' + '-' + '567' + '1'
+        bad_pb0 = '90' + '01' + '01' + '-' + '00' + '-' + '567' + '1'
+        self.assertNotIn('mykad', {x[2] for x in scan(bad_pb, 'fixture')})
+        self.assertNotIn('mykad', {x[2] for x in scan(bad_pb0, 'fixture')})
+        # Digits inside a longer number must not match.
+        longer = '1' + '90' + '01' + '01' + '14' + '567' + '1' + '9'
+        self.assertNotIn('mykad', {x[2] for x in scan('MyKad ' + longer, 'fixture')})
+        longer_dashed = '9' + '90' + '01' + '01' + '-' + '14' + '-' + '567' + '1'
+        self.assertNotIn('mykad', {x[2] for x in scan(longer_dashed, 'fixture')})
 
 
 
