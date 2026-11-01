@@ -1,9 +1,10 @@
 # Intentionally fake fixtures in unit tests only (path + rule; any line).
 test_portfolioguard.py:aws_access_key
-test_portfolioguard.py:email_address
-test_portfolioguard.py:phone_number
-test_portfolioguard.py:openai_api_key
-test_portfolioguard.py:slack_token
 test_portfolioguard.py:azure_connection_string
+test_portfolioguard.py:azure_shared_access_signature
+test_portfolioguard.py:email_address
 test_portfolioguard.py:generic_secret_assignment
 test_portfolioguard.py:nric_fin
+test_portfolioguard.py:openai_api_key
+test_portfolioguard.py:phone_number
+test_portfolioguard.py:slack_token

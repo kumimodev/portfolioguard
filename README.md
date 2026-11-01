@@ -1,6 +1,6 @@
 # PortfolioGuard
 
-**Version: 0.2.1**: scans pushed commits in the pre-push hook and adds focused credential and identifier rules.
+**Version: 0.2.2**: narrows Azure and NRIC/FIN matches, quotes hook paths safely, and applies configurable scan limits.
 
 PortfolioGuard is an offline Python pre-push scanner for likely secrets and personal data in a Git repository. It scans files locally and reports locations and rule names only. matched text is never included in output. It helps with review but is **not a guarantee** that sensitive data will be found or that a clean scan means a repository is safe. PortfolioGuard is offline only and does not connect to a network.
 
@@ -18,7 +18,7 @@ python /path/to/PortfolioGuard/portfolioguard.py . --history   # reachable Git h
 python /path/to/PortfolioGuard/portfolioguard.py . --range BASE..HEAD # commits in a range
 ```
 
-Working-tree mode checks tracked and untracked files not ignored by Git. Staged mode checks staged file contents. History mode checks files in every reachable commit and may take time on large repositories. Common generated/dependency directories and files over 2 MB are skipped.
+Working-tree mode checks tracked and untracked files not ignored by Git. Staged mode checks staged file contents. History mode checks files in every reachable commit and may take time on large repositories. Directories named `.git`, `node_modules`, `dist`, `build`, `.venv`, `venv`, `__pycache__`, `.idea` and `.vscode` are skipped in every scan mode. Binary files (identified by a null byte near the start) and files larger than 1 MB are also skipped. Set a different cap with `--max-bytes BYTES` (for example, `--max-bytes 2000000`). this applies to working-tree, staged, history, range and pre-push scans.
 
 Exit codes: `0` means no non-allowlisted findings, `1` means one or more findings need review, and `2` means the scan or requested operation could not run.
 
@@ -56,7 +56,9 @@ python /path/to/PortfolioGuard/portfolioguard.py . --format json
 
 `portfolioguard.toml` may contain additive `[[rules]]` entries with `name` and regular-expression `pattern` fields. It is loaded automatically from the repository root, falling back to the directory containing `portfolioguard.py`. `--rules PATH` replaces that auto-selected file. built-in rules remain active in either case. Do not put real credentials or personal data in the config.
 
-Built-in rules cover private keys, AWS and GitHub credentials, OpenAI `sk-` keys, Slack `xox…` and `xapp-` tokens, Azure connection strings and shared access signatures, common secret assignments (including quoted JSON keys and compound environment names), email addresses, phone numbers and Singapore-style NRIC/FIN identifiers.
+Built-in rules cover private keys, AWS and GitHub credentials, OpenAI `sk-` keys, Slack `xox…` and `xapp-` tokens, Azure account keys and shared access signatures, common secret assignments (including quoted JSON keys and compound environment names), email addresses, phone numbers and Singapore-style NRIC/FIN identifiers. Azure protocol-only documentation does not match. NRIC/FIN matches require valid checksums and standalone alphanumeric boundaries.
+
+Version 0.2.2 also quotes interpreter and script paths in installed hooks, including paths containing spaces or quotes.
 
 ## Demo
 

@@ -4,6 +4,8 @@ import json
 import subprocess
 import tempfile
 import unittest
+from unittest.mock import patch
+import shlex
 from pathlib import Path
 
 from portfolioguard import RULES, install_hook, is_allowed, load_allowlist, main, scan
@@ -41,12 +43,25 @@ class ScannerTests(unittest.TestCase):
             ('{"password": "test-secret-value"}', 'generic_secret_assignment'),
             ('OPENAI_API_KEY=' + 'sk-' + 'exampleexampleexampleexample1234', 'generic_secret_assignment'),
             ('slack_token=EXAMPLEfake-token-value', 'generic_secret_assignment'),
-            ('S1234567A', 'nric_fin'),
-            ('T9876543B', 'nric_fin'),
+            ('S0000000J', 'nric_fin'),
+            ('T0000000G', 'nric_fin'),
         ]
         for text, rule in samples:
             with self.subTest(rule=rule):
                 self.assertIn(rule, {x[2] for x in scan(text, 'fixture')})
+
+    def test_azure_requires_secret_fragment(self):
+        self.assertEqual(scan('DefaultEndpointsProtocol=https;EndpointSuffix=core.windows.net', 'docs'), [])
+        self.assertIn('azure_connection_string', {x[2] for x in scan('AccountKey=EXAMPLEbase64+/key==', 'fixture')})
+        self.assertIn('azure_connection_string', {x[2] for x in scan('SharedAccessSignature=sv=2024&sig=EXAMPLEsigvalue123', 'fixture')})
+        self.assertIn('azure_shared_access_signature', {x[2] for x in scan('https://example.test/?sig=EXAMPLEsignature123', 'fixture')})
+
+    def test_nric_checksum_and_token_boundaries(self):
+        self.assertIn('nric_fin', {x[2] for x in scan('S0000000J', 'fixture')})
+        self.assertNotIn('nric_fin', {x[2] for x in scan('S1234567A', 'fixture')})
+        for value in ('XS0000000J', 'S0000000JA', 'aS0000000J', 'S0000000Jf'):
+            with self.subTest(value=value):
+                self.assertNotIn('nric_fin', {x[2] for x in scan(value, 'fixture')})
 
     def test_toml_auto_load(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -98,6 +113,17 @@ class ScannerTests(unittest.TestCase):
             install_hook(root, force=True)
             self.assertIn('--pre-push', hook.read_text())
             self.assertTrue((hook.parent / 'pre-push.portfolioguard.bak').exists())
+
+    def test_hook_quotes_paths(self):
+        with tempfile.TemporaryDirectory(prefix='portfolio guard ') as tmp:
+            root = Path(tmp)
+            subprocess.run(['git', 'init', '-q', str(root)], check=True)
+            interpreter = '/tmp/python "quoted" path/python3'
+            with patch('portfolioguard.sys.executable', interpreter):
+                hook = install_hook(root)
+            body = hook.read_text()
+            self.assertIn(shlex.quote(interpreter), body)
+            self.assertIn(shlex.quote(str(Path(__file__).resolve().parent / 'portfolioguard.py')), body)
 
     def test_pre_push_blocks_committed_secret_and_allows_clean_push(self):
         with tempfile.TemporaryDirectory() as tmp:

@@ -1,5 +1,12 @@
 # Changelog
 
+## 0.2.2 (2026-11-01)
+- Removed Azure protocol-only matches. Azure findings now require an account key or shared access signature fragment, including SAS URL signatures.
+- Narrowed NRIC/FIN matching to standalone values and validate standard S/T/F/G/M checksums.
+- Shell-quoted interpreter and script paths in installed hooks so paths containing spaces or quotes work.
+- Lowered the default scan cap to 1 MB, added `--max-bytes`, and applied skipped-directory, size and binary-file checks across working-tree, staged, history, range and pre-push scans.
+- Documented the scan limits and fixes. added focused rule and hook-quoting tests.
+
 ## 0.2.1 (2026-11-01)
 - Fixed the pre-push hook to scan commits being pushed, including new remote branches, instead of the usually empty post-commit index.
 - Added range and pre-push commit scanning with history path filtering for skipped directories.

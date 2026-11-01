@@ -4,26 +4,35 @@ import json
 import os
 import re
 import shutil
+import shlex
 import subprocess
 import sys
 from pathlib import Path
 
-VERSION = "0.2.1"
-LIMIT = 2_000_000
-SKIP = {'.git', '.venv', 'venv', 'node_modules', '__pycache__', '.idea', '.vscode'}
+VERSION = "0.2.2"
+LIMIT = 1_000_000
+SKIP = {'.git', 'node_modules', 'dist', 'build', '.venv', 'venv', '__pycache__', '.idea', '.vscode'}
 RULES = [
     ('private_key', ('-----' + 'BEGIN' + ' (?:RSA |EC |OPENSSH |DSA )?PRIVATE KEY-----')),
     ('aws_access_key', r'\b(?:AKIA|ASIA)[A-Z0-9]{16}\b'),
     ('github_token', (r'\b(?:gh[pousr]_[A-Za-z0-9]{20,}|' + 'github' + '_pat_' + r'[A-Za-z0-9_]{20,})\b')),
     ('openai_api_key', r'\bsk-(?:proj-)?[A-Za-z0-9_-]{24,}\b'),
     ('slack_token', r'\b(?:xox[baprs]-[A-Za-z0-9-]{12,}|xapp-[A-Za-z0-9-]{12,})\b'),
-    ('azure_connection_string', r'(?i)\b(?:DefaultEndpointsProtocol\s*=\s*https?|AccountKey\s*=\s*[A-Za-z0-9+/=_-]{8,}|SharedAccessSignature\s*=\s*[^\s;]{8,})'),
-    ('azure_shared_access_signature', r'(?i)\bSharedAccessSignature\s+[A-Za-z0-9%&=;._+-]{12,}'),
+    ('azure_connection_string', r'(?i)\b(?:AccountKey\s*=\s*[A-Za-z0-9+/=_-]{8,}|SharedAccessSignature\s*=\s*[^\s;]{8,})'),
+    ('azure_shared_access_signature', r'(?i)\b(?:SharedAccessSignature\s+[A-Za-z0-9%&=;._+-]{12,}|sig=[A-Za-z0-9%._~-]{8,})'),
     ('generic_secret_assignment', r'''(?i)(?:^|[^A-Za-z0-9])["']?(?:[A-Za-z0-9]+[_-])*(?:api[_-]?key|secret|password|passwd|token|client[_-]?secret)["']?\s*[:=]\s*["']?([A-Za-z0-9_./+=-]{8,})'''),
-    ('nric_fin', r'\b[STFGM]\d{7}[A-Z]\b'),
+    ('nric_fin', r'(?<![A-Za-z0-9])[STFGM]\d{7}[A-Z](?![A-Za-z0-9])'),
     ('email_address', r'\b[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}\b'),
     ('phone_number', r'(?<![\w-])(?:\+\d[\d .()\-]{8,}\d|\d[\d .()\-]{8,}\d)(?![\w-])'),
 ]
+
+
+def valid_nric(value):
+    weights = (2, 7, 6, 5, 4, 3, 2)
+    prefix, digits, check = value[0], value[1:8], value[8]
+    offset = 4 if prefix in 'TG' else 0
+    letters = 'JZIHGFEDCBA' if prefix in 'ST' else 'XWUTRQPNMLK'
+    return letters[(sum(int(d) * w for d, w in zip(digits, weights)) + offset) % 11] == check
 
 
 def scan(text, name, rules=RULES, source='working-tree'):
@@ -31,7 +40,7 @@ def scan(text, name, rules=RULES, source='working-tree'):
     for n, line in enumerate(text.splitlines(), 1):
         for label, pattern in rules:
             match = re.search(pattern, line)
-            if match and (label != 'phone_number' or (sum(c.isdigit() for c in match.group()) >= 10 and not re.fullmatch(r'[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}', match.group()))):
+            if match and (label != 'phone_number' or (sum(c.isdigit() for c in match.group()) >= 10 and not re.fullmatch(r'[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}', match.group()))) and (label != 'nric_fin' or valid_nric(match.group())):
                 found.append((name, n, label, source))
     return found
 
@@ -51,7 +60,11 @@ def is_text(data):
     return b'\0' not in data[:8192]
 
 
-def working(root, rules):
+def skipped(name):
+    return any(part in SKIP for part in Path(name).parts)
+
+
+def working(root, rules, max_bytes=LIMIT):
     r = git(root, 'ls-files', '--cached', '--others', '--exclude-standard', '-z')
     if r.returncode:
         raise ValueError('Could not list repository files')
@@ -60,11 +73,11 @@ def working(root, rules):
         if not raw:
             continue
         name = os.fsdecode(raw)
-        if any(x in SKIP for x in Path(name).parts):
+        if skipped(name):
             continue
         p = root / name
         try:
-            if p.stat().st_size > LIMIT:
+            if p.stat().st_size > max_bytes:
                 continue
             data = p.read_bytes()
         except OSError:
@@ -74,7 +87,7 @@ def working(root, rules):
     return found
 
 
-def staged(root, rules):
+def staged(root, rules, max_bytes=LIMIT):
     r = git(root, 'diff', '--cached', '--name-only', '--diff-filter=ACMR', '-z')
     if r.returncode:
         raise ValueError('Could not list staged files')
@@ -83,13 +96,15 @@ def staged(root, rules):
         if not raw:
             continue
         name = os.fsdecode(raw)
+        if skipped(name):
+            continue
         b = git(root, 'show', f':{name}')
-        if not b.returncode and len(b.stdout) <= LIMIT and is_text(b.stdout):
+        if not b.returncode and len(b.stdout) <= max_bytes and is_text(b.stdout):
             found += scan(b.stdout.decode('utf-8', 'replace'), name, rules, 'staged')
     return found
 
 
-def history(root, rules):
+def history(root, rules, max_bytes=LIMIT):
     r = git(root, 'rev-list', '--all')
     if r.returncode:
         raise ValueError('Could not read Git history')
@@ -100,15 +115,15 @@ def history(root, rules):
             if not raw:
                 continue
             name = os.fsdecode(raw)
-            if any(x in SKIP for x in Path(name).parts):
+            if skipped(name):
                 continue
             b = git(root, 'show', f'{commit}:{name}')
-            if not b.returncode and len(b.stdout) <= LIMIT and is_text(b.stdout):
+            if not b.returncode and len(b.stdout) <= max_bytes and is_text(b.stdout):
                 found += scan(b.stdout.decode('utf-8', 'replace'), name, rules, f'history:{commit[:8]}')
     return found
 
 
-def commit_range(root, revisions, rules):
+def commit_range(root, revisions, rules, max_bytes=LIMIT):
     """Scan all blobs in commits selected by a git revision expression."""
     r = git(root, 'rev-list', *revisions)
     if r.returncode:
@@ -122,15 +137,15 @@ def commit_range(root, revisions, rules):
             if not raw:
                 continue
             name = os.fsdecode(raw)
-            if any(x in SKIP for x in Path(name).parts):
+            if skipped(name):
                 continue
             b = git(root, 'show', f'{commit}:{name}')
-            if not b.returncode and len(b.stdout) <= LIMIT and is_text(b.stdout):
+            if not b.returncode and len(b.stdout) <= max_bytes and is_text(b.stdout):
                 found += scan(b.stdout.decode('utf-8', 'replace'), name, rules, f'push:{commit[:8]}')
     return found
 
 
-def pre_push(root, rules, stream=None):
+def pre_push(root, rules, stream=None, max_bytes=LIMIT):
     zeros = '0' * 40
     found = []
     for raw in (stream or sys.stdin).read().splitlines():
@@ -141,14 +156,14 @@ def pre_push(root, rules, stream=None):
         if local_sha == zeros:
             continue
         if remote_sha != zeros:
-            found += commit_range(root, [f'{remote_sha}..{local_sha}'], rules)
+            found += commit_range(root, [f'{remote_sha}..{local_sha}'], rules, max_bytes)
         else:
             r = git(root, 'rev-list', local_sha, '--not', '--remotes')
             commits = r.stdout.decode('ascii', 'ignore').splitlines() if not r.returncode else []
             if not commits:
-                found += commit_range(root, [local_sha], rules)
+                found += commit_range(root, [local_sha], rules, max_bytes)
             else:
-                found += commit_range(root, [local_sha, '--not', '--remotes'], rules)
+                found += commit_range(root, [local_sha, '--not', '--remotes'], rules, max_bytes)
     return found
 
 
@@ -197,7 +212,7 @@ def install_hook(root, force=False):
             suffix += 1
         shutil.copy2(hook, backup)
     script = Path(__file__).resolve()
-    content = '#!/bin/sh\nexec "' + str(sys.executable) + '" "' + str(script) + '" --pre-push\n'
+    content = '#!/bin/sh\nexec ' + shlex.quote(str(sys.executable)) + ' ' + shlex.quote(str(script)) + ' --pre-push\n'
     hook.write_text(content, encoding='utf-8')
     hook.chmod(0o755)
     return hook
@@ -217,6 +232,7 @@ def main(argv=None):
     p.add_argument('--format', choices=('text', 'json'), default='text')
     p.add_argument('--install-hook', action='store_true', help='Install an offline commit-scan pre-push hook')
     p.add_argument('--force', action='store_true', help='Back up and replace an existing pre-push hook')
+    p.add_argument('--max-bytes', type=int, default=LIMIT, help=f'Maximum file size to scan (default: {LIMIT} bytes)')
     a = p.parse_args(argv)
     try:
         root = get_root(Path(a.path).resolve())
@@ -233,7 +249,9 @@ def main(argv=None):
             with open(config, 'rb') as f:
                 extra = tomllib.load(f).get('rules', [])
             rules += [(x['name'], re.compile(x['pattern'])) for x in extra]
-        found = pre_push(root, rules) if a.pre_push else commit_range(root, [a.revision_range], rules) if a.revision_range else staged(root, rules) if a.staged else history(root, rules) if a.history else working(root, rules)
+        if a.max_bytes < 0:
+            raise ValueError('--max-bytes must be non-negative')
+        found = pre_push(root, rules, max_bytes=a.max_bytes) if a.pre_push else commit_range(root, [a.revision_range], rules, a.max_bytes) if a.revision_range else staged(root, rules, a.max_bytes) if a.staged else history(root, rules, a.max_bytes) if a.history else working(root, rules, a.max_bytes)
         allow_path = Path(a.allowlist).resolve() if a.allowlist else root / '.portfolioguard-allowlist'
         allow_entries = load_allowlist(allow_path)
     except (OSError, ValueError, KeyError, re.error) as e:
