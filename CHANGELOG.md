@@ -1,5 +1,10 @@
 # Changelog
 
+## 0.3.1, 1 Nov 2026
+1. In `--history` mode, optional expected commit identities via `[[expected_identities]]` in `portfolioguard.toml` (email, optional name) or repeatable `--expect-email`.
+2. Commits whose author or committer email sits outside that list are reported as `unexpected-commit-identity`, with the short hash, field and email in the finding.
+3. Existing scans stay unchanged when the list is unset. Added unit tests that build temporary Git repos for matching, odd committer and odd author cases.
+
 ## Copy update, 1 Nov 2026
 
 1. Opened up hyphenated wording in the README and older changelog lines.

@@ -10,3 +10,12 @@
 # skip_dirs = [".git", "node_modules", ".venv", "venv", "__pycache__", ".idea", ".vscode"]
 # max_file_bytes raises the size cap (default 1000000). CLI --max-bytes overrides this when set.
 # max_file_bytes = 2000000
+
+# Optional expected Git identities for --history mode.
+# When set, every reachable commit whose author or committer email is outside
+# this list is reported as unexpected-commit-identity (path shows field:email).
+# name is optional. Repeat the table for each allowed identity.
+# CLI --expect-email EMAIL (repeatable) merges with this list.
+# [[expected_identities]]
+# email = "dev@example.com"
+# name = "Dev Example"

@@ -15,3 +15,5 @@ test_portfolioguard.py:slack_webhook
 test_portfolioguard.py:stripe_secret_key
 # Changelog version headers can look like phone numbers to the digit/dash matcher.
 CHANGELOG.md:phone_number
+# Documented example identity in commented toml sample.
+portfolioguard.toml:email_address

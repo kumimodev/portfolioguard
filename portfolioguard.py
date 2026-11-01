@@ -9,7 +9,7 @@ import subprocess
 import sys
 from pathlib import Path
 
-VERSION = "0.3.0"
+VERSION = "0.3.1"
 LIMIT = 1_000_000
 SKIP = {'.git', 'node_modules', 'dist', 'build', '.venv', 'venv', '__pycache__', '.idea', '.vscode'}
 
@@ -174,6 +174,43 @@ def history(root, rules, max_bytes=LIMIT, skip=None):
     return found
 
 
+def _identity_allowed(email, name, expected):
+    """True when email (and optional name) matches an expected identity entry."""
+    email_l = email.lower()
+    for entry in expected:
+        if entry['email'].lower() != email_l:
+            continue
+        want_name = entry.get('name')
+        if want_name is None or want_name == name:
+            return True
+    return False
+
+
+def unexpected_commit_identities(root, expected):
+    """Findings for history commits whose author or committer is outside expected.
+
+    expected is a list of dicts with required 'email' and optional 'name'.
+    Path encodes field:email so the unexpected address is visible in output.
+    """
+    if not expected:
+        return []
+    r = git(root, 'log', '--all', '--format=%H%x00%ae%x00%an%x00%ce%x00%cn')
+    if r.returncode:
+        raise ValueError('Could not read commit identities from Git history')
+    found = []
+    for line in r.stdout.decode('utf-8', 'replace').splitlines():
+        parts = line.split('\0')
+        if len(parts) != 5:
+            continue
+        commit, author_email, author_name, committer_email, committer_name = parts
+        source = f'history:{commit[:8]}'
+        if not _identity_allowed(author_email, author_name, expected):
+            found.append((f'author:{author_email}', 1, 'unexpected-commit-identity', source))
+        if not _identity_allowed(committer_email, committer_name, expected):
+            found.append((f'committer:{committer_email}', 1, 'unexpected-commit-identity', source))
+    return found
+
+
 def commit_range(root, revisions, rules, max_bytes=LIMIT, skip=None):
     """Scan all blobs in commits selected by a git revision expression."""
     r = git(root, 'rev-list', *revisions)
@@ -284,6 +321,8 @@ def main(argv=None):
     p.add_argument('--install-hook', action='store_true', help='Install an offline commit-scan pre-push hook')
     p.add_argument('--force', action='store_true', help='Back up and replace an existing pre-push hook')
     p.add_argument('--max-bytes', type=int, default=None, help=f'Maximum file size to scan (default: {LIMIT} bytes, or max_file_bytes from portfolioguard.toml)')
+    p.add_argument('--expect-email', action='append', default=[], metavar='EMAIL',
+                   help='In --history mode, allow this author/committer email (repeatable). Merges with expected_identities from config.')
     a = p.parse_args(argv)
     try:
         root = get_root(Path(a.path).resolve())
@@ -297,6 +336,7 @@ def main(argv=None):
             raise ValueError(f'Rules file not found: {config}')
         skip = None
         max_bytes = LIMIT
+        expected_identities = []
         if config.is_file():
             import tomllib
             with open(config, 'rb') as f:
@@ -308,11 +348,28 @@ def main(argv=None):
                 skip = set(data['skip_dirs'])
             if 'max_file_bytes' in data:
                 max_bytes = int(data['max_file_bytes'])
+            if 'expected_identities' in data:
+                raw_ids = data['expected_identities']
+                if not isinstance(raw_ids, list):
+                    raise ValueError('expected_identities must be a list of tables with email (and optional name)')
+                for i, entry in enumerate(raw_ids):
+                    if not isinstance(entry, dict) or 'email' not in entry or not isinstance(entry['email'], str) or not entry['email']:
+                        raise ValueError(f'expected_identities[{i}] must be a table with a non-empty email string')
+                    item = {'email': entry['email']}
+                    if 'name' in entry:
+                        if not isinstance(entry['name'], str) or not entry['name']:
+                            raise ValueError(f'expected_identities[{i}].name must be a non-empty string when set')
+                        item['name'] = entry['name']
+                    expected_identities.append(item)
+        for email in a.expect_email:
+            expected_identities.append({'email': email})
         if a.max_bytes is not None:
             max_bytes = a.max_bytes
         if max_bytes < 0:
             raise ValueError('--max-bytes / max_file_bytes must be non-negative')
         found = pre_push(root, rules, max_bytes=max_bytes, skip=skip) if a.pre_push else commit_range(root, [a.revision_range], rules, max_bytes, skip) if a.revision_range else staged(root, rules, max_bytes, skip) if a.staged else history(root, rules, max_bytes, skip) if a.history else working(root, rules, max_bytes, skip)
+        if a.history and expected_identities:
+            found += unexpected_commit_identities(root, expected_identities)
         allow_path = Path(a.allowlist).resolve() if a.allowlist else root / '.portfolioguard-allowlist'
         allow_entries = load_allowlist(allow_path)
     except (OSError, ValueError, KeyError, re.error) as e:

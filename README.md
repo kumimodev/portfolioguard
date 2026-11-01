@@ -2,7 +2,7 @@
 
 # PortfolioGuard
 
-**Version: 0.3.0**: GitHub Action for push and PR scans, Malaysian MyKad detection, plus tighter Slack, Discord and Stripe rules.
+**Version: 0.3.1**: History mode can require expected commit author and committer identities, plus the 0.3.0 Action, MyKad, Slack, Discord and Stripe rules.
 
 Offline Python helper that looks through a Git repo for things that look like secrets or personal data before you push. It runs on your machine only (no network) and prints the file, line and rule name. It never prints the matched text itself. Handy as a second look, but a clean run is **not** a guarantee that nothing sensitive is in there.
 
@@ -21,6 +21,8 @@ python /path/to/PortfolioGuard/portfolioguard.py . --range BASE..HEAD # commits 
 ```
 
 Working tree mode covers tracked and untracked files that Git isn't ignoring. Staged mode looks at what's in the index. History mode walks every reachable commit. Fine on small repos, can be slow on big ones.
+
+In `--history` mode you can require that every reachable commit uses an expected author and committer identity. Set `[[expected_identities]]` in `portfolioguard.toml` with an `email` and optional `name`, or pass `--expect-email EMAIL` (repeatable). The CLI list merges with the config list. When that list is set, any commit whose author email or committer email is outside it is reported as `unexpected-commit-identity`. The finding shows the short commit hash in the source, plus `author:` or `committer:` and the email in the path. Leave it unset and history mode stays content only, same as before.
 
 By default it skips directories named `.git`, `node_modules`, `dist`, `build`, `.venv`, `venv`, `__pycache__`, `.idea` and `.vscode` in every mode. It also skips binary files (null byte near the start) and anything over 1 MB. Change the size with `--max-bytes BYTES` (e.g. `--max-bytes 2000000`). That applies to working tree, staged, history, range and pre-push. You can set the same limits in `portfolioguard.toml` (see below).
 
@@ -83,7 +85,7 @@ python /path/to/PortfolioGuard/portfolioguard.py . --format json
 
 ## Custom rules and scan limits
 
-`portfolioguard.toml` can hold extra `[[rules]]` with `name` and regex `pattern`, plus optional top-level `skip_dirs` (list of directory name strings) and `max_file_bytes` (integer). Loaded from the repo root if present, otherwise from next to `portfolioguard.py`. `--rules PATH` picks a different file instead. Built-in rules always stay on. Don't put real secrets or personal data in the config.
+`portfolioguard.toml` can hold extra `[[rules]]` with `name` and regex `pattern`, plus optional top-level `skip_dirs` (list of directory name strings), `max_file_bytes` (integer), and `[[expected_identities]]` tables (`email`, optional `name`) for history identity checks. Loaded from the repo root if present, otherwise from next to `portfolioguard.py`. `--rules PATH` picks a different file instead. Built-in rules always stay on. Don't put real secrets or personal data in the config.
 
 Built in rules cover private keys, AWS and GitHub credentials, OpenAI secret keys, Slack bot and app tokens plus Slack incoming webhooks, Discord bot tokens and webhook URLs, Stripe secret and restricted keys (live and test), Azure account keys and shared access signatures, common secret assignments (including quoted JSON keys and compound env names), emails, phone numbers, Singapore style NRIC/FIN, and Malaysian MyKad numbers (dashed or 12 digit, with a real date and JPN birthplace code). Azure protocol only docs don't match. NRIC/FIN needs a valid checksum and proper boundaries. MyKad matches without dashes stay quieter and want a nearby IC or MyKad style keyword on the line.
 

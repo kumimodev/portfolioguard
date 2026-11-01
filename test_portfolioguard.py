@@ -1,4 +1,5 @@
 import contextlib
+import os
 import io
 import json
 import subprocess
@@ -282,6 +283,71 @@ class ScannerTests(unittest.TestCase):
         self.assertNotIn('slack_token', {x[2] for x in scan(embedded, 'fixture')})
 
 
+    def test_history_expected_identities_all_match(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            subprocess.run(['git', 'init', '-q', str(root)], check=True)
+            run_git(root, 'config', 'user.email', 'dev@example.com')
+            run_git(root, 'config', 'user.name', 'Dev Example')
+            (root / 'readme.txt').write_text('clean baseline\n')
+            run_git(root, 'add', 'readme.txt')
+            run_git(root, 'commit', '-m', 'baseline')
+            (root / 'portfolioguard.toml').write_text(
+                '[[expected_identities]]\n'
+                'email = "dev@example.com"\n'
+                'name = "Dev Example"\n'
+            )
+            output = io.StringIO()
+            with contextlib.redirect_stdout(output):
+                code = main([str(root), '--history'])
+            self.assertEqual(code, 0)
+            self.assertNotIn('unexpected-commit-identity', output.getvalue())
+
+    def test_history_unexpected_committer(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            subprocess.run(['git', 'init', '-q', str(root)], check=True)
+            (root / 'readme.txt').write_text('clean baseline\n')
+            run_git(root, 'add', 'readme.txt')
+            env = os.environ.copy()
+            env.update({
+                'GIT_AUTHOR_NAME': 'Dev Example',
+                'GIT_AUTHOR_EMAIL': 'dev@example.com',
+                'GIT_COMMITTER_NAME': 'Other Person',
+                'GIT_COMMITTER_EMAIL': 'other@example.com',
+            })
+            run_git(root, 'commit', '-m', 'mixed identities', env=env)
+            output = io.StringIO()
+            with contextlib.redirect_stdout(output):
+                code = main([str(root), '--history', '--expect-email', 'dev@example.com'])
+            self.assertEqual(code, 1)
+            body = output.getvalue()
+            self.assertIn('unexpected-commit-identity', body)
+            self.assertIn('committer:other@example.com', body)
+            self.assertNotIn('author:dev@example.com', body)
+
+    def test_history_unexpected_author(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            subprocess.run(['git', 'init', '-q', str(root)], check=True)
+            (root / 'readme.txt').write_text('clean baseline\n')
+            run_git(root, 'add', 'readme.txt')
+            env = os.environ.copy()
+            env.update({
+                'GIT_AUTHOR_NAME': 'Odd Author',
+                'GIT_AUTHOR_EMAIL': 'odd@example.com',
+                'GIT_COMMITTER_NAME': 'Dev Example',
+                'GIT_COMMITTER_EMAIL': 'dev@example.com',
+            })
+            run_git(root, 'commit', '-m', 'odd author', env=env)
+            output = io.StringIO()
+            with contextlib.redirect_stdout(output):
+                code = main([str(root), '--history', '--expect-email', 'dev@example.com'])
+            self.assertEqual(code, 1)
+            body = output.getvalue()
+            self.assertIn('unexpected-commit-identity', body)
+            self.assertIn('author:odd@example.com', body)
+            self.assertNotIn('committer:dev@example.com', body)
 
 
 
