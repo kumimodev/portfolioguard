@@ -234,6 +234,56 @@ class ScannerTests(unittest.TestCase):
         longer_dashed = '9' + '90' + '01' + '01' + '-' + '14' + '-' + '567' + '1'
         self.assertNotIn('mykad', {x[2] for x in scan(longer_dashed, 'fixture')})
 
+    def test_slack_discord_stripe_rules(self):
+        slack_bot = 'xo' + 'xb-' + '123456789012-123456789012-EXAMPLEexampleExample12'
+        slack_user = 'xo' + 'xp-' + '123456789012-123456789012-EXAMPLEexampleExample12'
+        slack_app = 'xo' + 'xa-' + '123456789012-123456789012-EXAMPLEexampleExample12'
+        slack_config = 'xo' + 'xr-' + '123456789012-123456789012-EXAMPLEexampleExample12'
+        slack_session = 'xo' + 'xs-' + '123456789012-123456789012-EXAMPLEexampleExample12'
+        slack_xapp = 'xa' + 'pp-' + '1-EXAMPLEEXAMPLEEX-abcdefgh'
+        for token, rule in (
+            (slack_bot, 'slack_token'),
+            (slack_user, 'slack_token'),
+            (slack_app, 'slack_token'),
+            (slack_config, 'slack_token'),
+            (slack_session, 'slack_token'),
+            (slack_xapp, 'slack_token'),
+        ):
+            with self.subTest(token=token[:8]):
+                self.assertIn(rule, {x[2] for x in scan('token=' + token, 'fixture')})
+
+        slack_hook = 'https://' + 'hooks.' + 'slack' + '.com/' + 'services/' + 'T' + '00000000/B00000000/XXXXXXXXXXXXXXXXXXXXXXXX'
+        self.assertIn('slack_webhook', {x[2] for x in scan(slack_hook, 'fixture')})
+
+        discord_token = 'M' + ('a' * 23) + '.' + ('b' * 6) + '.' + ('c' * 27)
+        self.assertIn('discord_bot_token', {x[2] for x in scan('bot=' + discord_token, 'fixture')})
+        discord_hook = 'https://' + 'discord' + '.com/api/webhooks/' + '1234567890123456789/' + ('a' * 40)
+        discord_hook_app = 'https://' + 'discord' + 'app' + '.com/api/webhooks/' + '1234567890123456789/' + ('b' * 40)
+        self.assertIn('discord_webhook', {x[2] for x in scan(discord_hook, 'fixture')})
+        self.assertIn('discord_webhook', {x[2] for x in scan(discord_hook_app, 'fixture')})
+
+        stripe_live = 'sk' + '_' + 'live' + '_' + ('A' * 24)
+        stripe_test = 'sk' + '_' + 'test' + '_' + ('B' * 24)
+        stripe_rk = 'rk' + '_' + 'live' + '_' + ('C' * 24)
+        for key, rule in (
+            (stripe_live, 'stripe_secret_key'),
+            (stripe_test, 'stripe_secret_key'),
+            (stripe_rk, 'stripe_secret_key'),
+        ):
+            with self.subTest(key=key[:10]):
+                self.assertIn(rule, {x[2] for x in scan('key=' + key, 'fixture')})
+
+        # Negatives: short / wrong prefix / embedded in longer token-like junk.
+        self.assertNotIn('slack_token', {x[2] for x in scan('token=' + 'xo' + 'xb-short', 'fixture')})
+        self.assertNotIn('stripe_secret_key', {x[2] for x in scan('key=' + 'sk' + '_' + 'live' + '_short', 'fixture')})
+        self.assertNotIn('discord_bot_token', {x[2] for x in scan('bot=NotADiscordToken', 'fixture')})
+        embedded = 'X' + 'xo' + 'xb-' + '123456789012-123456789012-EXAMPLEexampleExample12'
+        # Leading word char should fail the \b on slack_token.
+        self.assertNotIn('slack_token', {x[2] for x in scan(embedded, 'fixture')})
+
+
+
+
 
 
 if __name__ == '__main__':

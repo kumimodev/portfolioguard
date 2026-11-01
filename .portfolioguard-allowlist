@@ -8,6 +8,10 @@ test_portfolioguard.py:nric_fin
 test_portfolioguard.py:openai_api_key
 test_portfolioguard.py:phone_number
 test_portfolioguard.py:slack_token
+test_portfolioguard.py:discord_bot_token
+test_portfolioguard.py:discord_webhook
 test_portfolioguard.py:mykad
+test_portfolioguard.py:slack_webhook
+test_portfolioguard.py:stripe_secret_key
 # Changelog version headers can look like phone numbers to the digit/dash matcher.
 CHANGELOG.md:phone_number
