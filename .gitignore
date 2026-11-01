@@ -1,2 +1,10 @@
 __pycache__/
+*.pyc
+.venv/
+venv/
 .pytest_cache/
+dist/
+build/
+# Local-only scan helpers (never publish site-specific configs)
+portfolioguard.local.toml
+.portfolioguard-allowlist.local
