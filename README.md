@@ -1,3 +1,5 @@
+![PortfolioGuard banner](.github/banner.png)
+
 # PortfolioGuard
 
 **Version: 0.2.3**: clearer warning about skipped folders, plus `skip_dirs` / `max_file_bytes` in `portfolioguard.toml`.
