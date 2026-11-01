@@ -8,16 +8,21 @@ import subprocess
 import sys
 from pathlib import Path
 
-VERSION = "0.2.0"
+VERSION = "0.2.1"
 LIMIT = 2_000_000
 SKIP = {'.git', '.venv', 'venv', 'node_modules', '__pycache__', '.idea', '.vscode'}
 RULES = [
     ('private_key', ('-----' + 'BEGIN' + ' (?:RSA |EC |OPENSSH |DSA )?PRIVATE KEY-----')),
     ('aws_access_key', r'\b(?:AKIA|ASIA)[A-Z0-9]{16}\b'),
     ('github_token', (r'\b(?:gh[pousr]_[A-Za-z0-9]{20,}|' + 'github' + '_pat_' + r'[A-Za-z0-9_]{20,})\b')),
-    ('generic_secret_assignment', r'''(?i)\b(?:api[_-]?key|secret|password|passwd|token|client[_-]?secret)\b\s*[:=]\s*["']?([A-Za-z0-9_./+=-]{8,})'''),
+    ('openai_api_key', r'\bsk-(?:proj-)?[A-Za-z0-9_-]{24,}\b'),
+    ('slack_token', r'\b(?:xox[baprs]-[A-Za-z0-9-]{12,}|xapp-[A-Za-z0-9-]{12,})\b'),
+    ('azure_connection_string', r'(?i)\b(?:DefaultEndpointsProtocol\s*=\s*https?|AccountKey\s*=\s*[A-Za-z0-9+/=_-]{8,}|SharedAccessSignature\s*=\s*[^\s;]{8,})'),
+    ('azure_shared_access_signature', r'(?i)\bSharedAccessSignature\s+[A-Za-z0-9%&=;._+-]{12,}'),
+    ('generic_secret_assignment', r'''(?i)(?:^|[^A-Za-z0-9])["']?(?:[A-Za-z0-9]+[_-])*(?:api[_-]?key|secret|password|passwd|token|client[_-]?secret)["']?\s*[:=]\s*["']?([A-Za-z0-9_./+=-]{8,})'''),
+    ('nric_fin', r'\b[STFGM]\d{7}[A-Z]\b'),
     ('email_address', r'\b[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}\b'),
-    ('phone_number', r'(?<!\w)(?:\+?\d[\d .()\-]{8,}\d)(?!\w)'),
+    ('phone_number', r'(?<![\w-])(?:\+\d[\d .()\-]{8,}\d|\d[\d .()\-]{8,}\d)(?![\w-])'),
 ]
 
 
@@ -26,7 +31,7 @@ def scan(text, name, rules=RULES, source='working-tree'):
     for n, line in enumerate(text.splitlines(), 1):
         for label, pattern in rules:
             match = re.search(pattern, line)
-            if match and (label != 'phone_number' or sum(c.isdigit() for c in match.group()) >= 10):
+            if match and (label != 'phone_number' or (sum(c.isdigit() for c in match.group()) >= 10 and not re.fullmatch(r'[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}', match.group()))):
                 found.append((name, n, label, source))
     return found
 
@@ -95,9 +100,55 @@ def history(root, rules):
             if not raw:
                 continue
             name = os.fsdecode(raw)
+            if any(x in SKIP for x in Path(name).parts):
+                continue
             b = git(root, 'show', f'{commit}:{name}')
             if not b.returncode and len(b.stdout) <= LIMIT and is_text(b.stdout):
                 found += scan(b.stdout.decode('utf-8', 'replace'), name, rules, f'history:{commit[:8]}')
+    return found
+
+
+def commit_range(root, revisions, rules):
+    """Scan all blobs in commits selected by a git revision expression."""
+    r = git(root, 'rev-list', *revisions)
+    if r.returncode:
+        raise ValueError('Could not read pushed commit range')
+    found = []
+    for commit in r.stdout.decode('ascii', 'ignore').splitlines():
+        tree = git(root, 'ls-tree', '-r', '--name-only', '-z', commit)
+        if tree.returncode:
+            continue
+        for raw in tree.stdout.split(b'\0'):
+            if not raw:
+                continue
+            name = os.fsdecode(raw)
+            if any(x in SKIP for x in Path(name).parts):
+                continue
+            b = git(root, 'show', f'{commit}:{name}')
+            if not b.returncode and len(b.stdout) <= LIMIT and is_text(b.stdout):
+                found += scan(b.stdout.decode('utf-8', 'replace'), name, rules, f'push:{commit[:8]}')
+    return found
+
+
+def pre_push(root, rules, stream=None):
+    zeros = '0' * 40
+    found = []
+    for raw in (stream or sys.stdin).read().splitlines():
+        fields = raw.split()
+        if len(fields) != 4:
+            continue
+        _local_ref, local_sha, _remote_ref, remote_sha = fields
+        if local_sha == zeros:
+            continue
+        if remote_sha != zeros:
+            found += commit_range(root, [f'{remote_sha}..{local_sha}'], rules)
+        else:
+            r = git(root, 'rev-list', local_sha, '--not', '--remotes')
+            commits = r.stdout.decode('ascii', 'ignore').splitlines() if not r.returncode else []
+            if not commits:
+                found += commit_range(root, [local_sha], rules)
+            else:
+                found += commit_range(root, [local_sha, '--not', '--remotes'], rules)
     return found
 
 
@@ -146,7 +197,7 @@ def install_hook(root, force=False):
             suffix += 1
         shutil.copy2(hook, backup)
     script = Path(__file__).resolve()
-    content = '#!/bin/sh\nexec "' + str(sys.executable) + '" "' + str(script) + '" --staged\n'
+    content = '#!/bin/sh\nexec "' + str(sys.executable) + '" "' + str(script) + '" --pre-push\n'
     hook.write_text(content, encoding='utf-8')
     hook.chmod(0o755)
     return hook
@@ -158,11 +209,13 @@ def main(argv=None):
     m = p.add_mutually_exclusive_group()
     m.add_argument('--staged', action='store_true')
     m.add_argument('--history', action='store_true')
+    m.add_argument('--pre-push', action='store_true', help='Scan commits described on pre-push hook stdin')
+    m.add_argument('--range', dest='revision_range', help='Scan commits in a Git revision range')
     p.add_argument('--rules', help='TOML additions: [[rules]] name/pattern')
     p.add_argument('--allowlist', help='Allowlist path (default: .portfolioguard-allowlist at repository root)')
     p.add_argument('--candidates', action='store_true', help='Print allowlist candidate lines (locations and rules only)')
     p.add_argument('--format', choices=('text', 'json'), default='text')
-    p.add_argument('--install-hook', action='store_true', help='Install an offline staged-scan pre-push hook')
+    p.add_argument('--install-hook', action='store_true', help='Install an offline commit-scan pre-push hook')
     p.add_argument('--force', action='store_true', help='Back up and replace an existing pre-push hook')
     a = p.parse_args(argv)
     try:
@@ -172,12 +225,15 @@ def main(argv=None):
             print(f'Installed PortfolioGuard pre-push hook: {hook}')
             return 0
         rules = [(n, re.compile(x)) for n, x in RULES]
-        if a.rules:
+        config = Path(a.rules).resolve() if a.rules else (root / 'portfolioguard.toml' if (root / 'portfolioguard.toml').is_file() else Path(__file__).resolve().parent / 'portfolioguard.toml')
+        if a.rules and not config.is_file():
+            raise ValueError(f'Rules file not found: {config}')
+        if config.is_file():
             import tomllib
-            with open(a.rules, 'rb') as f:
+            with open(config, 'rb') as f:
                 extra = tomllib.load(f).get('rules', [])
             rules += [(x['name'], re.compile(x['pattern'])) for x in extra]
-        found = staged(root, rules) if a.staged else history(root, rules) if a.history else working(root, rules)
+        found = pre_push(root, rules) if a.pre_push else commit_range(root, [a.revision_range], rules) if a.revision_range else staged(root, rules) if a.staged else history(root, rules) if a.history else working(root, rules)
         allow_path = Path(a.allowlist).resolve() if a.allowlist else root / '.portfolioguard-allowlist'
         allow_entries = load_allowlist(allow_path)
     except (OSError, ValueError, KeyError, re.error) as e:

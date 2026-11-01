@@ -1,6 +1,6 @@
 # PortfolioGuard
 
-**Version: 0.2.0**: adds allowlisting, JSON output and a pre-push hook installer.
+**Version: 0.2.1**: scans pushed commits in the pre-push hook and adds focused credential and identifier rules.
 
 PortfolioGuard is an offline Python pre-push scanner for likely secrets and personal data in a Git repository. It scans files locally and reports locations and rule names only. matched text is never included in output. It helps with review but is **not a guarantee** that sensitive data will be found or that a clean scan means a repository is safe. PortfolioGuard is offline only and does not connect to a network.
 
@@ -15,6 +15,7 @@ Run the script by its local path from the repository you want to scan:
 python /path/to/PortfolioGuard/portfolioguard.py .            # working tree
 python /path/to/PortfolioGuard/portfolioguard.py . --staged    # staged contents
 python /path/to/PortfolioGuard/portfolioguard.py . --history   # reachable Git history
+python /path/to/PortfolioGuard/portfolioguard.py . --range BASE..HEAD # commits in a range
 ```
 
 Working-tree mode checks tracked and untracked files not ignored by Git. Staged mode checks staged file contents. History mode checks files in every reachable commit and may take time on large repositories. Common generated/dependency directories and files over 2 MB are skipped.
@@ -42,7 +43,7 @@ From a Git repository, run:
 python /path/to/PortfolioGuard/portfolioguard.py --install-hook
 ```
 
-The installed hook runs a staged scan, stays offline, and blocks a push when non-allowlisted findings remain. Existing hooks are preserved unless `--force` is supplied. `--force` backs up the previous hook beside it as `pre-push.portfolioguard.bak` (with a numeric suffix if needed) before replacement.
+The installed hook reads Git's pre-push update records and scans the commits being pushed. For an existing remote ref it scans `remote_sha..local_sha`. for a new ref it scans commits reachable from the local tip that are not already on remote-tracking refs, falling back to the full reachable history if necessary. It stays offline and blocks a push when non-allowlisted findings remain. It does not depend on the staging area, which is normally empty after a commit. Existing hooks are preserved unless `--force` is supplied. `--force` backs up the previous hook beside it as `pre-push.portfolioguard.bak` (with a numeric suffix if needed) before replacement.
 
 ## JSON output
 
@@ -53,7 +54,9 @@ python /path/to/PortfolioGuard/portfolioguard.py . --format json
 
 ## Custom rules
 
-`portfolioguard.toml` may contain additive `[[rules]]` entries with `name` and regular-expression `pattern` fields. Pass another file with `--rules PATH`. Do not put real credentials or personal data in the config.
+`portfolioguard.toml` may contain additive `[[rules]]` entries with `name` and regular-expression `pattern` fields. It is loaded automatically from the repository root, falling back to the directory containing `portfolioguard.py`. `--rules PATH` replaces that auto-selected file. built-in rules remain active in either case. Do not put real credentials or personal data in the config.
+
+Built-in rules cover private keys, AWS and GitHub credentials, OpenAI `sk-` keys, Slack `xox…` and `xapp-` tokens, Azure connection strings and shared access signatures, common secret assignments (including quoted JSON keys and compound environment names), email addresses, phone numbers and Singapore-style NRIC/FIN identifiers.
 
 ## Demo
 

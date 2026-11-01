@@ -9,6 +9,11 @@ from pathlib import Path
 from portfolioguard import RULES, install_hook, is_allowed, load_allowlist, main, scan
 
 
+def run_git(root, *args, **kwargs):
+    return subprocess.run(['git', '-C', str(root), *args], check=True, stdout=subprocess.PIPE,
+                          stderr=subprocess.PIPE, **kwargs)
+
+
 class ScannerTests(unittest.TestCase):
     def test_secret_and_personal_data(self):
         got = {(x[1], x[2]) for x in scan('email=alex@example.test\npassword="test-secret-value"\nkey=' + 'AKIA' + 'EXAMPLEKEY123456', 'demo')}
@@ -22,6 +27,38 @@ class ScannerTests(unittest.TestCase):
     def test_phone_rule_requires_more_digits(self):
         self.assertEqual(scan('id=12345678', 'demo'), [])
         self.assertIn('phone_number', {x[2] for x in scan('Call +44 (20) 1234 5678', 'demo')})
+        uuid_rules = {x[2] for x in scan('550e8400-e29b-41d4-a716-446655440000', 'demo')}
+        self.assertNotIn('phone_number', uuid_rules)
+        self.assertNotIn('slack_token', uuid_rules)
+
+    def test_new_secret_rules(self):
+        samples = [
+            ('key=' + 'sk-' + 'proj-' + 'EXAMPLEEXAMPLEEXAMPLEEXAMPLEexample', 'openai_api_key'),
+            ('key=' + 'sk-' + 'exampleexampleexampleexample1234', 'openai_api_key'),
+            ('token=' + 'xox' + 'b-' + '123456789012-123456789012-EXAMPLEexampleExample12', 'slack_token'),
+            ('token=' + 'xapp-' + '1-EXAMPLEEXAMPLEEX-abcdefgh', 'slack_token'),
+            ('DefaultEndpointsProtocol=https;AccountName=examplestorage;AccountKey=EXAMPLEbase64+/key==;EndpointSuffix=core.windows.net', 'azure_connection_string'),
+            ('{"password": "test-secret-value"}', 'generic_secret_assignment'),
+            ('OPENAI_API_KEY=' + 'sk-' + 'exampleexampleexampleexample1234', 'generic_secret_assignment'),
+            ('slack_token=EXAMPLEfake-token-value', 'generic_secret_assignment'),
+            ('S1234567A', 'nric_fin'),
+            ('T9876543B', 'nric_fin'),
+        ]
+        for text, rule in samples:
+            with self.subTest(rule=rule):
+                self.assertIn(rule, {x[2] for x in scan(text, 'fixture')})
+
+    def test_toml_auto_load(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            subprocess.run(['git', 'init', '-q', str(root)], check=True)
+            (root / 'portfolioguard.toml').write_text('[[rules]]\nname="custom_marker"\npattern="CUSTOM-[0-9]{4}"\n')
+            (root / 'sample.txt').write_text('CUSTOM-1234\n')
+            output = io.StringIO()
+            with contextlib.redirect_stdout(output):
+                code = main([str(root)])
+            self.assertEqual(code, 1)
+            self.assertIn('[custom_marker]', output.getvalue())
 
     def test_allowlist_suppression(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -59,8 +96,58 @@ class ScannerTests(unittest.TestCase):
             with self.assertRaises(ValueError):
                 install_hook(root)
             install_hook(root, force=True)
-            self.assertIn('--staged', hook.read_text())
+            self.assertIn('--pre-push', hook.read_text())
             self.assertTrue((hook.parent / 'pre-push.portfolioguard.bak').exists())
+
+    def test_pre_push_blocks_committed_secret_and_allows_clean_push(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            base = Path(tmp)
+            repo, bare = base / 'repo', base / 'remote.git'
+            subprocess.run(['git', 'init', '-q', str(repo)], check=True)
+            subprocess.run(['git', 'init', '--bare', '-q', str(bare)], check=True)
+            run_git(repo, 'config', 'user.email', 'fixture@example.test')
+            run_git(repo, 'config', 'user.name', 'Fixture')
+            run_git(repo, 'remote', 'add', 'origin', str(bare))
+            install_hook(repo)
+            (repo / 'clean.txt').write_text('clean baseline\n')
+            run_git(repo, 'add', 'clean.txt')
+            run_git(repo, 'commit', '-m', 'baseline')
+            run_git(repo, 'push', '-u', 'origin', 'HEAD')
+            baseline = run_git(repo, 'rev-parse', 'HEAD').stdout.decode().strip()
+            (repo / 'config.txt').write_text('password="test-secret-value"\n')
+            run_git(repo, 'add', 'config.txt')
+            run_git(repo, 'commit', '-m', 'fake secret fixture')
+            failed = subprocess.run(['git', '-C', str(repo), 'push', 'origin', 'HEAD'], stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+            self.assertNotEqual(failed.returncode, 0)
+            self.assertNotIn('test-secret-value', failed.stdout.decode() + failed.stderr.decode())
+            remote_tip = subprocess.run(['git', '--git-dir', str(bare), 'rev-parse', 'refs/heads/master'], stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+            if remote_tip.returncode:
+                remote_tip = subprocess.run(['git', '--git-dir', str(bare), 'rev-parse', 'refs/heads/main'], stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+            self.assertEqual(remote_tip.stdout.decode().strip(), baseline)
+            run_git(repo, 'reset', '--hard', baseline)
+            (repo / 'safe.txt').write_text('clean follow-up\n')
+            run_git(repo, 'add', 'safe.txt')
+            run_git(repo, 'commit', '-m', 'clean commit')
+            run_git(repo, 'push', 'origin', 'HEAD')
+
+    def test_pre_push_new_branch_scans_unpublished_commit(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            base = Path(tmp)
+            repo, bare = base / 'repo', base / 'remote.git'
+            subprocess.run(['git', 'init', '-q', str(repo)], check=True)
+            subprocess.run(['git', 'init', '--bare', '-q', str(bare)], check=True)
+            run_git(repo, 'config', 'user.email', 'fixture@example.test')
+            run_git(repo, 'config', 'user.name', 'Fixture')
+            run_git(repo, 'remote', 'add', 'origin', str(bare))
+            install_hook(repo)
+            (repo / 'secret.txt').write_text('password="test-secret-value"\n')
+            run_git(repo, 'add', 'secret.txt')
+            run_git(repo, 'commit', '-m', 'new branch fake secret')
+            run_git(repo, 'checkout', '-b', 'new-feature')
+            result = subprocess.run(['git', '-C', str(repo), 'push', '-u', 'origin', 'new-feature'], stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+            self.assertNotEqual(result.returncode, 0)
+            self.assertNotIn('test-secret-value', result.stdout.decode() + result.stderr.decode())
+            self.assertNotEqual(subprocess.run(['git', '--git-dir', str(bare), 'show-ref'], stdout=subprocess.PIPE).returncode, 0)
 
 
 if __name__ == '__main__':
