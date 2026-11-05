@@ -17,3 +17,5 @@ test_portfolioguard.py:stripe_secret_key
 CHANGELOG.md:phone_number
 # Documented example identity in commented toml sample.
 portfolioguard.toml:email_address
+# Documented example public contact address in README.
+README.md:email_address
