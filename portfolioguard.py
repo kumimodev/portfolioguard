@@ -87,6 +87,16 @@ def scan(text, name, rules=RULES, source='working-tree'):
             value = match.group()
             if label == 'phone_number' and (sum(c.isdigit() for c in value) < 10 or re.fullmatch(r'[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}', value)):
                 continue
+            if label == 'phone_number':
+                before = line[:match.start()]
+                if re.search(r'(?i)urn:li:(?:activity|share):$', before):
+                    continue
+                if ('viewBox' in line and re.search(r'(?i)viewBox\s*=\s*["\'][^"\']*$', before)):
+                    continue
+                if re.search(r'(?i)\bd\s*=\s*["\'][^"\']*\b[MLHVCSQTAZ][^"\']*$', before):
+                    continue
+                if re.fullmatch(r'\s*[-+]?\d+(?:\.\d+)?(?:\s+[-+]?\d+(?:\.\d+)?){1,}', line.strip()):
+                    continue
             if label == 'nric_fin' and not valid_nric(value):
                 continue
             if label == 'mykad' and not valid_mykad(value, line):
@@ -337,11 +347,18 @@ def main(argv=None):
         skip = None
         max_bytes = LIMIT
         expected_identities = []
+        allowed_email_values = []
         if config.is_file():
             import tomllib
             with open(config, 'rb') as f:
                 data = tomllib.load(f)
             rules += [(x['name'], re.compile(x['pattern'])) for x in data.get('rules', [])]
+            allowed_email_values = data.get('allowed_email_values', [])
+            if not isinstance(allowed_email_values, list) or not all(isinstance(x, str) and re.fullmatch(r'[^@\s]+@[^@\s]+', x) for x in allowed_email_values):
+                raise ValueError('allowed_email_values must be a list of email strings')
+            if allowed_email_values:
+                escaped = '|'.join(re.escape(x) for x in allowed_email_values)
+                rules = [(n, re.compile(r'(?i)\b(?!(?:' + escaped + r')\b)[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}\b') if n == 'email_address' else p) for n, p in rules]
             if 'skip_dirs' in data:
                 if not isinstance(data['skip_dirs'], list) or not all(isinstance(x, str) for x in data['skip_dirs']):
                     raise ValueError('skip_dirs must be a list of directory name strings')

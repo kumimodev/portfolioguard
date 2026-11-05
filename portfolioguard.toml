@@ -3,6 +3,10 @@
 # name = "internal_identifier"
 # pattern = "\\bINTERNAL-[0-9]{5}\\b"
 
+# Exact public contact emails are ignored by the email_address rule.
+# Matching is case-insensitive. Private addresses remain findings unless listed.
+# allowed_email_values = ["hello@kumimo.dev"]
+
 # Optional scan limits (override built-in defaults when set).
 # skip_dirs replaces the default skipped directory names entirely.
 # Default skipped names: .git, node_modules, dist, build, .venv, venv, __pycache__, .idea, .vscode

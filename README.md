@@ -2,7 +2,7 @@
 
 # PortfolioGuard
 
-**Version: 0.3.1**: History mode can require expected commit author and committer identities, plus the 0.3.0 Action, MyKad, Slack, Discord and Stripe rules.
+**Version: 0.3.1**: Includes context fixes for SVG and LinkedIn phone false positives, plus exact public email value allows. History mode can require expected commit author and committer identities, alongside the 0.3.0 Action, MyKad, Slack, Discord and Stripe rules.
 
 Offline Python helper that looks through a Git repo for things that look like secrets or personal data before you push. It runs on your machine only (no network) and prints the file, line and rule name. It never prints the matched text itself. Handy as a second look, but a clean run is **not** a guarantee that nothing sensitive is in there.
 
@@ -36,7 +36,7 @@ PortfolioGuard does **not** scan the default skipped folders, or files over the 
 2. A secret that ended up under `node_modules`, `.venv` or another skipped tree
 3. A big text dump over the size cap that never gets scanned
 
-So a clean scan does **not** mean skipped or over size stuff is fine. If you're about to publish a static site (or anything else) that lives under a skipped name, take it out of the skip list or bump the size cap first.
+So a clean scan does **not** mean skipped or over size stuff is fine. A clean exit with a private local allowlist also does not mean a fresh clone or Pages publish is clean, because that allowlist is not present there. If you're about to publish a static site (or anything else) that lives under a skipped name, take it out of the skip list or bump the size cap first.
 
 Put the overrides in that repo's `portfolioguard.toml` (same file that holds custom rules). `skip_dirs` **replaces** the built in list when you set it. `max_file_bytes` sets the size cap (`--max-bytes` on the command line wins if you pass it):
 ```toml
@@ -60,6 +60,8 @@ Paths are relative to the repo root with `/` separators. Rule names are whatever
 ```sh
 python /path/to/PortfolioGuard/portfolioguard.py . --candidates
 ```
+
+For intentional public contact addresses, set `allowed_email_values` in `portfolioguard.toml`. Values match complete email addresses without regard to case. For example, `hello@kumimo.dev` is the public contact address used in the sample config. Private addresses such as personal Gmail addresses remain findings unless they are explicitly listed. Avoid putting this setting or a path allowlist in a Pages served tree. A committed `.portfolioguard-allowlist` file is public at `/.portfolioguard-allowlist` when the repository root is served by GitHub Pages.
 
 ## GitHub Action
 
@@ -85,7 +87,7 @@ python /path/to/PortfolioGuard/portfolioguard.py . --format json
 
 ## Custom rules and scan limits
 
-`portfolioguard.toml` can hold extra `[[rules]]` with `name` and regex `pattern`, plus optional top-level `skip_dirs` (list of directory name strings), `max_file_bytes` (integer), and `[[expected_identities]]` tables (`email`, optional `name`) for history identity checks. Loaded from the repo root if present, otherwise from next to `portfolioguard.py`. `--rules PATH` picks a different file instead. Built-in rules always stay on. Don't put real secrets or personal data in the config.
+`portfolioguard.toml` can hold extra `[[rules]]` with `name` and regex `pattern`, plus optional top-level `allowed_email_values` (list of exact email values), `skip_dirs` (list of directory name strings), `max_file_bytes` (integer), and `[[expected_identities]]` tables (`email`, optional `name`) for history identity checks. Loaded from the repo root if present, otherwise from next to `portfolioguard.py`. `--rules PATH` picks a different file instead. Built-in rules always stay on. Don't put real secrets or personal data in the config.
 
 Built in rules cover private keys, AWS and GitHub credentials, OpenAI secret keys, Slack bot and app tokens plus Slack incoming webhooks, Discord bot tokens and webhook URLs, Stripe secret and restricted keys (live and test), Azure account keys and shared access signatures, common secret assignments (including quoted JSON keys and compound env names), emails, phone numbers, Singapore style NRIC/FIN, and Malaysian MyKad numbers (dashed or 12 digit, with a real date and JPN birthplace code). Azure protocol only docs don't match. NRIC/FIN needs a valid checksum and proper boundaries. MyKad matches without dashes stay quieter and want a nearby IC or MyKad style keyword on the line.
 

@@ -1,9 +1,12 @@
 # Changelog
 
 ## 0.3.1, 1 Nov 2026
-1. In `--history` mode, optional expected commit identities via `[[expected_identities]]` in `portfolioguard.toml` (email, optional name) or repeatable `--expect-email`.
-2. Commits whose author or committer email sits outside that list are reported as `unexpected-commit-identity`, with the short hash, field and email in the finding.
-3. Existing scans stay unchanged when the list is unset. Added unit tests that build temporary Git repos for matching, odd committer and odd author cases.
+1. Ignore SVG coordinate data and LinkedIn activity or share URNs in phone number checks while keeping ordinary phone detection enabled.
+2. Added exact, case insensitive `allowed_email_values` for intentional public contact addresses and documented the GitHub Pages visibility of committed allowlists.
+3. Strengthened the clean exit guidance for private local allowlists and Pages publishes.
+4. In `--history` mode, optional expected commit identities via `[[expected_identities]]` in `portfolioguard.toml` (email, optional name) or repeatable `--expect-email`.
+5. Commits whose author or committer email sits outside that list are reported as `unexpected-commit-identity`, with the short hash, field and email in the finding.
+6. Existing scans stay unchanged when the list is unset. Added unit tests that build temporary Git repos for matching, odd committer and odd author cases.
 
 ## Copy update, 1 Nov 2026
 

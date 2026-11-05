@@ -34,6 +34,31 @@ class ScannerTests(unittest.TestCase):
         self.assertNotIn('phone_number', uuid_rules)
         self.assertNotIn('slack_token', uuid_rules)
 
+    def test_phone_svg_and_linkedin_context(self):
+        samples = [
+            'viewBox="39.20 39.20 921.60 921.60"',
+            '<path d="M 123.45 678.90 L 987.65 432.10"/>',
+            'Originally shared on LinkedIn urn:li:activity:7521137514804400128',
+            'urn:li:share:7521137514804400128',
+        ]
+        for sample in samples:
+            with self.subTest(sample=sample):
+                self.assertNotIn('phone_number', {x[2] for x in scan(sample, 'fixture.svg')})
+        self.assertIn('phone_number', {x[2] for x in scan('Call +44 (20) 1234 5678', 'fixture.svg')})
+
+    def test_configured_public_email_value_allow(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            subprocess.run(['git', 'init', '-q', str(root)], check=True)
+            (root / 'portfolioguard.toml').write_text('allowed_email_values = ["hello@kumimo.dev"]\n')
+            (root / 'contacts.txt').write_text('hello@kumimo.dev\nprivate.person@gmail.com\n')
+            output = io.StringIO()
+            with contextlib.redirect_stdout(output):
+                code = main([str(root)])
+            self.assertEqual(code, 1)
+            self.assertNotIn('hello@kumimo.dev', output.getvalue())
+            self.assertIn('email_address', output.getvalue())
+
     def test_new_secret_rules(self):
         samples = [
             ('key=' + 'sk' + '-' + 'proj-' + 'EXAMPLEEXAMPLEEXAMPLEEXAMPLEexample', 'openai_api_key'),
