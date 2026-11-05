@@ -13,6 +13,14 @@ from portfolioguard import install_hook, is_allowed, load_allowlist, main, scan
 
 
 def run_git(root, *args, **kwargs):
+    # Drop box/CI GIT_* identity overrides unless the caller passed env=
+    # (history fixtures rely on repo user.* config, not ambient committer env).
+    if 'env' not in kwargs:
+        env = os.environ.copy()
+        for key in list(env):
+            if key.startswith(('GIT_AUTHOR_', 'GIT_COMMITTER_')):
+                env.pop(key, None)
+        kwargs['env'] = env
     return subprocess.run(['git', '-C', str(root), *args], check=True, stdout=subprocess.PIPE,
                           stderr=subprocess.PIPE, **kwargs)
 
