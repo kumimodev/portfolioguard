@@ -127,9 +127,9 @@ For intentional public contact addresses, set `allowed_email_values` in `portfol
 
 ## GitHub Action
 
-If a pre-push hook never runs (cloud agents with a custom `core.hooksPath`, or anyone who pushes from a machine without the hook installed), add the workflow that ships in `.github/workflows/portfolioguard.yml`. It runs on every push and pull request, checks out with `fetch-depth: 0`, sets up Python, runs the unit tests, then scans the working tree and reachable history. The job fails on findings. Permissions stay at `contents: read` and no secrets are used.
+If a pre-push hook never runs (cloud agents with a custom `core.hooksPath`, or anyone who pushes from a machine without the hook installed), add the workflow that ships in `.github/workflows/portfolioguard.yml`. It runs on every push and pull request, checks out with `fetch-depth: 0`, sets up Python, runs the unit tests, a performance guard (every rule on 1MB hostile lines with a 10 second limit) and a short differential fuzz of the linear matchers (`fuzz_regex.py`, set `PG_FUZZ_COUNT` for a bigger local run), then scans the working tree and reachable history. The job fails on findings. Permissions stay at `contents: read` and no secrets are used.
 
-Copy that workflow into another repo, or point a reusable workflow at this file once you publish one. Keep `portfolioguard.py`, the tests, and `.portfolioguard-allowlist` available to the job (same repo, or check them out beside the workflow).
+Copy that workflow into another repo, or point a reusable workflow at this file once you publish one. Keep `portfolioguard.py`, the tests (`test_*.py` and `fuzz_regex.py`), and `.portfolioguard-allowlist` available to the job (same repo, or check them out beside the workflow).
 
 ## Pre-push hook
 

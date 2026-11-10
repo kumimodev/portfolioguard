@@ -13,8 +13,11 @@
 10. The README now has a prominent note that exit `3` is not `1`, so scripts should treat any non-zero code as not clean.
 11. New opt-in `drafts` profile (`--profile drafts` or `profile = ["drafts"]` in the config) with rules for private and carrier grade NAT IPv4 addresses, `.ts.net` hostnames, MAC addresses, home networking device brands and models, and an overclaim word list that only warns. Custom terms can be added under `[drafts]`. Default scans are unchanged.
 12. The built in `email_address` rule now matches in linear time, so a long dotted line no longer hangs a scan. What it detects is unchanged.
-13. The built in `generic_secret_assignment` rule now matches in linear time, so a long hyphen or underscore run no longer hangs a scan. What it detects is unchanged.
+13. The built in `generic_secret_assignment` rule now matches in linear time, so repeated keywords such as `password=` or `token=a` on a long line no longer hang a scan. What it detects is unchanged.
 14. The built in `phone_number` rule now matches in linear time, so a long line of repeated digits and hyphens such as ` 1-1-1-` no longer hangs a scan. What it detects is unchanged.
+15. New performance guard in the tests: every built in and drafts profile rule is run alone on 1MB hostile single lines (repeated keywords, separator runs, near miss prefixes), each in its own process with a 10 second limit, plus the CLI with the drafts profile on. A new rule without a timing payload fails the suite. The existing 1MB hang tests now use the same 10 second limit.
+16. `fuzz_regex.py` is now checked in. It compares the linear email, secret and phone matchers with the old regexes on deterministic generated strings, and a mutation check proves that deliberately broken copies of the matchers are caught. CI runs a short pass. Set `PG_FUZZ_COUNT` and `PG_FUZZ_SEED` for a larger local run.
+17. The GitHub Action runs the unit tests, the performance guard and the fuzz check as separate steps, with a job timeout.
 
 ## 0.3.1, 1 Nov 2026
 1. Ignore SVG coordinate data and LinkedIn activity or share URNs in phone number checks while keeping ordinary phone detection enabled.

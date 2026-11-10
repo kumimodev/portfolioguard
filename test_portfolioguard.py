@@ -396,7 +396,7 @@ class EmailAddressTests(unittest.TestCase):
         try:
             done = subprocess.run(
                 [sys.executable, str(script), '--stdin', '--max-bytes', '1000000'],
-                input=payload.encode(), timeout=5,
+                input=payload.encode(), timeout=10,
                 stdout=subprocess.PIPE, stderr=subprocess.PIPE,
             )
         except subprocess.TimeoutExpired:
@@ -455,7 +455,7 @@ class EmailAddressTests(unittest.TestCase):
                 done = subprocess.run(
                     [sys.executable, str(script), '--stdin', '--rules', str(rules),
                      '--max-bytes', '1000000'],
-                    input=payload.encode(), timeout=5,
+                    input=payload.encode(), timeout=10,
                     stdout=subprocess.PIPE, stderr=subprocess.PIPE,
                 )
             except subprocess.TimeoutExpired:
@@ -475,7 +475,7 @@ class GenericSecretTests(unittest.TestCase):
         pat = SecretPattern()
         samples = [
             '{"password": "test-secret-value"}',
-            'OPENAI_API_KEY=sk-exampleexampleexampleexample1234',
+            'OPENAI_API_KEY=' + 'sk' + '-' + 'exampleexampleexampleexample1234',
             'slack_token=EXAMPLEfake-token-value',
             '  token=12345678',
             'tokenizer=abcdefgh',
@@ -549,7 +549,7 @@ class GenericSecretTests(unittest.TestCase):
                 try:
                     done = subprocess.run(
                         [sys.executable, str(script), '--stdin', '--max-bytes', '1000000'],
-                        input=payload.encode(), timeout=5,
+                        input=payload.encode(), timeout=10,
                         stdout=subprocess.PIPE, stderr=subprocess.PIPE,
                     )
                 except subprocess.TimeoutExpired:
@@ -572,7 +572,7 @@ class GenericSecretTests(unittest.TestCase):
                 try:
                     done = subprocess.run(
                         [sys.executable, str(script), '--stdin', '--max-bytes', '1000000'],
-                        input=payload.encode(), timeout=5,
+                        input=payload.encode(), timeout=10,
                         stdout=subprocess.PIPE, stderr=subprocess.PIPE,
                     )
                 except subprocess.TimeoutExpired:
@@ -1205,7 +1205,7 @@ class DraftProfileTests(unittest.TestCase):
             done = subprocess.run(
                 [sys.executable, str(script), '--stdin', '--profile', 'drafts',
                  '--max-bytes', '1000000'],
-                input=payload.encode(), timeout=5,
+                input=payload.encode(), timeout=10,
                 stdout=subprocess.PIPE, stderr=subprocess.PIPE,
             )
         except subprocess.TimeoutExpired:

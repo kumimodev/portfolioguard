@@ -10,6 +10,7 @@ permissions:
 jobs:
   scan:
     runs-on: ubuntu-latest
+    timeout-minutes: 15
     steps:
       - name: Check out repository
         uses: actions/checkout@v4
@@ -22,7 +23,13 @@ jobs:
           python-version: '3.12'
 
       - name: Unit tests
-        run: python3 -m unittest -q
+        run: python3 -m unittest -q test_portfolioguard
+
+      - name: Performance guard (1MB hostile lines, 10 second limit per rule)
+        run: python3 -m unittest -v test_performance
+
+      - name: Differential fuzz and mutation check
+        run: python3 fuzz_regex.py
 
       - name: Working tree scan
         run: python3 portfolioguard.py .

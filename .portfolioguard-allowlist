@@ -30,3 +30,16 @@ portfolioguard.toml:email_address
 README.md:email_address
 # Documented 4-part version example in the drafts private_ipv4 README note.
 README.md:private_ipv4
+# Fuzz and timing harnesses: generated fake strings and hostile repeat units only.
+fuzz_regex.py:email_address
+fuzz_regex.py:generic_secret_assignment
+fuzz_regex.py:phone_number
+test_performance.py:email_address
+test_performance.py:generic_secret_assignment
+test_performance.py:phone_number
+# Timing payloads for the drafts profile rules are hostile repeat units, not real hosts or claims.
+test_performance.py:private_ipv4
+test_performance.py:cgnat_ipv4
+test_performance.py:tailscale_hostname
+test_performance.py:device_brand_model
+test_performance.py:overclaim_word
