@@ -26,7 +26,9 @@ In `--history` mode you can require that every reachable commit uses an expected
 
 By default it skips directories named `.git`, `node_modules`, `dist`, `build`, `.venv`, `venv`, `__pycache__`, `.idea` and `.vscode` in every mode. It also skips binary files (null byte near the start) and anything over 1 MB. Change the size with `--max-bytes BYTES` (e.g. `--max-bytes 2000000`). That applies to working tree, staged, history, range and pre-push. You can set the same limits in `portfolioguard.toml` (see below).
 
-Exit codes: `0` means nothing outside the allowlist turned up, `1` means something needs a look, `2` means the scan or install couldn't run. Files mode adds `3`, meaning nothing needed a look but at least one file or stdin you named was not scanned (see below).
+Exit codes: `0` means nothing outside the allowlist turned up, `1` means something needs a look, `2` means the scan or install couldn't run. Files mode adds `3`.
+
+> **Exit `3` is not `1`.** Code `3` (files mode only) means nothing needed a look, but something you asked for was not scanned: a named file or stdin that was binary, UTF-16, over the size cap or unreadable, or, with `--strict`, a file skipped inside a directory. Don't write `[ $? -eq 1 ]` or `if %errorlevel%==1`, because that treats `3` as clean. Treat any non-zero code as "not clean", for example `python portfolioguard.py --files drafts/ || echo needs a look`, and only read the number to learn why. Git scans never return `3`.
 
 ## Scan files outside a git repo
 
@@ -43,11 +45,50 @@ python /path/to/PortfolioGuard/portfolioguard.py --files notes.md -             
 3. Findings use the same rules, output lines, `--format json`, `--candidates` and exit codes (`0`, `1`, `2`, plus the new `3` described below) as repo scans. Only the source label changes: `files` for paths and `stdin` for standard input, for example `files: drafts/post.md:12 [email_address]`.
 4. The name shown is the path as you typed it, tidied (`./drafts/../drafts/post.md` becomes `drafts/post.md`), with `/` separators. For a directory it is the directory you gave plus the path inside it. Absolute paths stay absolute.
 5. The size cap and binary skip work as in repo mode (`--max-bytes`, `max_file_bytes`). Files that look like UTF-16 (PowerShell redirection and Notepad can write it) contain null bytes, so they count as binary and are not scanned. Save such files as UTF-8 first.
-6. A skip is never presented as clean. For a file or stdin you named yourself, a line such as `PortfolioGuard: skipped drafts/big.md (over size limit)` goes to stderr, stdout says `NOT SCANNED: 1 named input(s) were skipped (see stderr). A clean result does not cover them.` instead of `No configured patterns matched.`, and the exit code is `3`. Real findings still win, so a run with findings and a skipped input exits `1` and prints both. Code `3` is new and was picked because `0`, `1` and `2` are taken: it is non-zero, so a script or hook treats the run as not clean, but it is different from `1`, so it isn't confused with a finding. With `--format json` or `--candidates`, stdout stays machine readable and the notice goes to stderr. Files skipped inside a directory (binary, over the size cap, unreadable, or not a regular file) are counted in the summary, for example `Skipped 3 file(s) inside directories: 2 binary, 1 over size limit.`, and don't change the exit code. A path that doesn't exist is an error (exit `2`).
-7. There is no repository root, so the current directory plays that part. `.portfolioguard-allowlist` and `portfolioguard.toml` are read from it (the usual fallback to the config next to `portfolioguard.py` still applies), or use `--allowlist PATH` and `--rules PATH`. An exact allowlist entry must match the name as printed, so use `drafts/post.md:12:email_address` when you pass `drafts/post.md`. Glob entries such as `drafts/*.md:email_address` match as before.
-8. Files mode can't be combined with `--staged`, `--history`, `--range`, `--pre-push` or `--install-hook`. Without `--files` or `--stdin`, nothing changes: PortfolioGuard still needs a Git repository.
+6. A skip is never presented as clean. For a file or stdin you named yourself:
+   - a line such as `PortfolioGuard: skipped drafts/big.md (over size limit)` goes to stderr
+   - stdout says `NOT SCANNED: 1 named input(s) were skipped (see stderr). A clean result does not cover them.` instead of `No configured patterns matched.`
+   - the exit code is `3`, unless there are real findings, which still win and exit `1` (both lines are printed)
+   - with `--format json` or `--candidates`, stdout stays machine readable and the notice goes to stderr
+
+   Code `3` was picked because `0`, `1` and `2` are taken. It is non-zero, so a script or hook treats the run as not clean, and it differs from `1`, so it isn't mistaken for a finding.
+7. Files skipped inside a directory (binary, over the size cap, unreadable, or not a regular file) are counted in the summary, for example `Skipped 3 file(s) inside directories: 2 binary, 1 over size limit.` By default they don't change the exit code. Add `--strict` to make them count: the summary becomes `NOT SCANNED (--strict): ...` and the run exits `3`, the same code and meaning as a skipped named input. Symlinks inside a directory are ignored by design and are not counted. `--strict` is for `--files` and `--stdin` only, and is an error with git modes. Use it for a folder you are about to upload, where a skipped file could hide something.
+8. If standard input is closed (`<&-` in a shell), `--stdin` stops with `PortfolioGuard: Standard input is closed...` and exit `2`.
+9. There is no repository root, so the current directory plays that part. `.portfolioguard-allowlist` and `portfolioguard.toml` are read from it (the usual fallback to the config next to `portfolioguard.py` still applies), or use `--allowlist PATH` and `--rules PATH`. An exact allowlist entry must match the name as printed, so use `drafts/post.md:12:email_address` when you pass `drafts/post.md`. Glob entries such as `drafts/*.md:email_address` match as before.
+10. Files mode can't be combined with `--staged`, `--history`, `--range`, `--pre-push` or `--install-hook`. Without `--files` or `--stdin`, nothing changes: PortfolioGuard still needs a Git repository.
 
 A clean run only means these patterns didn't match, so it's still a second look and not a guarantee.
+
+## Draft profile (opt-in extra rules)
+
+The default rules look for secrets and personal data. For Markdown drafts and other copy that is about to go public, switch on the `drafts` profile. It adds rules for details that are easy to paste by accident and that the default rules ignore. It works in every mode (working tree, `--staged`, `--history`, `--files`, `--stdin`) and is off unless you ask for it:
+```sh
+python /path/to/PortfolioGuard/portfolioguard.py --files drafts/ --profile drafts
+```
+Or set `profile = ["drafts"]` at the top of `portfolioguard.toml` (see below).
+
+| Rule | Looks for |
+| --- | --- |
+| `private_ipv4` | Private IPv4 addresses (the 10.x, 172.16 to 172.31 and 192.168 ranges, valid octets only) |
+| `cgnat_ipv4` | Carrier grade NAT addresses, which is the 100.64 to 100.127 range that Tailscale uses |
+| `tailscale_hostname` | Names ending in `.ts.net`, such as a machine or tailnet name |
+| `mac_address` | MAC addresses written with colons or dashes (six pairs of hex digits) |
+| `device_brand_model` | Home networking and NAS brands and common model patterns (`DRAFT_DEVICE_TERMS` in the script) |
+| `overclaim_word` | Strong claim words such as the ones in `DRAFT_OVERCLAIM_TERMS`: "cannot", "guarantee", "fully", "always", "100%" and similar |
+
+`private_ipv4` also matches 4-part version strings that fall inside those ranges, such as `10.15.7.1`. Use the allowlist for those. The `mac_address` rule matches any 6-pair colon or dash hex string, not only a real hardware address.
+
+`overclaim_word` is a **warning**. It is listed with a `[warning]` tag, it never changes the exit code, and the summary counts warnings separately. It can't judge whether a claim is true, it only makes you look at each hit. A hit with a negation just before it in the same clause ("not a guarantee", "never fully") is ignored. The other rules count as normal findings and can fail the run (exit `1`). The allowlist works for all of them, so `drafts/*.md:overclaim_word` silences a warning for those files. As always, only the location and the rule name are printed, never the matched text. With `--format json`, each entry gets an extra `warning` key when a profile is on.
+
+Add your own terms in `portfolioguard.toml`. They only apply when the profile is on, and they extend the built in lists. Matching is case insensitive and on whole words:
+```toml
+profile = ["drafts"]
+
+[drafts]
+device_terms = ["ExampleBrand", "example-host"]
+overclaim_terms = ["flawless"]
+```
+Keep real hostnames and device names in a private local config, not in a committed one. Things the profile does not cover: IPv6 addresses, Cisco style dotted MAC addresses, `.lan`, `.internal` and `.local` names, and any judgement about whether a claim is true.
 
 ## Warning: skipped paths are not “clean”
 
@@ -110,7 +151,7 @@ python /path/to/PortfolioGuard/portfolioguard.py . --format json
 
 `portfolioguard.toml` can hold extra `[[rules]]` with `name` and regex `pattern`, plus optional top-level `allowed_email_values` (list of exact email values), `skip_dirs` (list of directory name strings), `max_file_bytes` (integer), and `[[expected_identities]]` tables (`email`, optional `name`) for history identity checks. Loaded from the repo root if present, otherwise from next to `portfolioguard.py`. `--rules PATH` picks a different file instead. Built-in rules always stay on. Don't put real secrets or personal data in the config.
 
-Built in rules cover private keys, AWS and GitHub credentials, OpenAI secret keys, Slack bot and app tokens plus Slack incoming webhooks, Discord bot tokens and webhook URLs, Stripe secret and restricted keys (live and test), Azure account keys and shared access signatures, common secret assignments (including quoted JSON keys and compound env names), emails, phone numbers, Singapore style NRIC/FIN, and Malaysian MyKad numbers (dashed or 12 digit, with a real date and JPN birthplace code). Azure protocol only docs don't match. NRIC/FIN needs a valid checksum and proper boundaries. MyKad matches without dashes stay quieter and want a nearby IC or MyKad style keyword on the line.
+Opt-in profiles are listed in the draft profile section above. Built in rules cover private keys, AWS and GitHub credentials, OpenAI secret keys, Slack bot and app tokens plus Slack incoming webhooks, Discord bot tokens and webhook URLs, Stripe secret and restricted keys (live and test), Azure account keys and shared access signatures, common secret assignments (including quoted JSON keys and compound env names), emails, phone numbers, Singapore style NRIC/FIN, and Malaysian MyKad numbers (dashed or 12 digit, with a real date and JPN birthplace code). Azure protocol only docs don't match. NRIC/FIN needs a valid checksum and proper boundaries. MyKad matches without dashes stay quieter and want a nearby IC or MyKad style keyword on the line.
 
 Hook install quotes the interpreter and script paths with `shlex.quote`, so spaces and quotes in the path are fine.
 

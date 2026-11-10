@@ -13,9 +13,20 @@ test_portfolioguard.py:discord_webhook
 test_portfolioguard.py:mykad
 test_portfolioguard.py:slack_webhook
 test_portfolioguard.py:stripe_secret_key
+# Opt-in drafts profile: the fake fixtures and the word lists live in these files.
+test_portfolioguard.py:private_ipv4
+test_portfolioguard.py:cgnat_ipv4
+test_portfolioguard.py:tailscale_hostname
+test_portfolioguard.py:mac_address
+test_portfolioguard.py:device_brand_model
+test_portfolioguard.py:overclaim_word
+portfolioguard.py:device_brand_model
+portfolioguard.py:overclaim_word
 # Changelog version headers can look like phone numbers to the digit/dash matcher.
 CHANGELOG.md:phone_number
 # Documented example identity in commented toml sample.
 portfolioguard.toml:email_address
 # Documented example public contact address in README.
 README.md:email_address
+# Documented 4-part version example in the drafts private_ipv4 README note.
+README.md:private_ipv4

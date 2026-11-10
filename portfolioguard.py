@@ -49,6 +49,44 @@ RULES = [
 ]
 
 
+# Opt-in rule sets, switched on with --profile NAME or profile = ["NAME"] in portfolioguard.toml.
+# They are meant for Markdown drafts and other copy that is about to go public. Default scans never use them.
+_OCTET = r'(?:25[0-5]|2[0-4]\d|1\d\d|[1-9]?\d)'
+_IP_TAIL = r'\.' + _OCTET + r'\.' + _OCTET
+_IP_END = r'(?!\d|\.\d)'
+DRAFT_DEVICE_TERMS = ('TP-Link', 'Netgear', 'Linksys', 'D-Link', 'Tenda', 'MikroTik', 'Ubiquiti', 'UniFi', 'Eero', 'Orbi',
+                      'Synology', 'QNAP')
+DRAFT_OVERCLAIM_TERMS = ('cannot', 'guarantee', 'guarantees', 'guaranteed', 'secure', 'secured', 'secures', 'fully',
+                         'always', 'completely', 'perfectly', 'impossible', 'bulletproof', 'foolproof', 'unhackable',
+                         '100%', 'on the first try', 'on the first attempt')
+DRAFT_RULES = [
+    ('private_ipv4', r'(?<![\d.])(?:10' + _IP_TAIL + r'\.' + _OCTET + r'|172\.(?:1[6-9]|2\d|3[01])' + _IP_TAIL + r'|192\.168' + _IP_TAIL + r')' + _IP_END),
+    ('cgnat_ipv4', r'(?<![\d.])100\.(?:6[4-9]|[7-9]\d|1[01]\d|12[0-7])' + _IP_TAIL + _IP_END),
+    ('tailscale_hostname', r'(?i)(?<![a-z0-9-])[a-z0-9-]+\.ts\.net\b'),
+    ('mac_address', r'(?<![0-9A-Fa-f:-])(?:[0-9A-Fa-f]{2}[:-]){5}[0-9A-Fa-f]{2}(?![0-9A-Fa-f:-])'),
+    ('device_brand_model', r'(?i)(?<![A-Za-z0-9])(?:' + '|'.join(re.escape(x) for x in DRAFT_DEVICE_TERMS)
+     + r'|RE\d{3}[A-Z]?|Archer\s+[A-Z]{1,2}\d{2,4}|TL-[A-Z]{1,3}\d{3,4}[A-Z]*)(?![A-Za-z0-9])'),
+    ('overclaim_word', r'(?i)(?<![A-Za-z0-9])(?:' + '|'.join(re.escape(x) for x in DRAFT_OVERCLAIM_TERMS) + r')(?![A-Za-z0-9])'),
+]
+_NEGATION = re.compile(r"(?i)(?:\bnot\b|\bno\b|\bnever\b|n't\b|\bwithout\b)")
+# Rules that only warn: they are listed but never change the exit code.
+WARNING_RULES = frozenset({'overclaim_word'})
+PROFILES = {'drafts': DRAFT_RULES}
+
+
+def profile_rules(names, extra=None):
+    """Compiled rules for the named profiles. extra: {'device_terms': [...], 'overclaim_terms': [...]} from config."""
+    extra = extra or {}
+    rules = []
+    for name in dict.fromkeys(names):
+        for label, pattern in PROFILES[name]:
+            terms = extra.get({'device_brand_model': 'device_terms', 'overclaim_word': 'overclaim_terms'}.get(label, ''), [])
+            if terms:
+                pattern = pattern[:-len(r')(?![A-Za-z0-9])')] + '|' + '|'.join(re.escape(x) for x in terms) + r')(?![A-Za-z0-9])'
+            rules.append((label, re.compile(pattern)))
+    return rules
+
+
 def valid_nric(value):
     weights = (2, 7, 6, 5, 4, 3, 2)
     prefix, digits, check = value[0], value[1:8], value[8]
@@ -86,6 +124,12 @@ def scan(text, name, rules=RULES, source='working-tree'):
             match = re.search(pattern, line)
             if not match:
                 continue
+            if label == 'overclaim_word':
+                # A hit with a negation just before it in the same clause ("not a guarantee", "never fully") is a disclaimer.
+                match = next((m for m in re.finditer(pattern, line)
+                              if not _NEGATION.search(re.split(r'[,;.:!?()]', line[max(0, m.start() - 24):m.start()])[-1])), None)
+                if not match:
+                    continue
             value = match.group()
             if label == 'phone_number' and (sum(c.isdigit() for c in value) < 10 or re.fullmatch(r'[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}', value)):
                 continue
@@ -119,9 +163,15 @@ def display_name(path):
 class Skips:
     """Inputs that were not scanned. Named ones are reported one by one, directory ones are counted."""
 
-    def __init__(self):
+    def __init__(self, strict=False):
         self.named = []
         self.in_dirs = {}
+        self.strict = strict
+
+    @property
+    def failing(self):
+        """True when something was not scanned that must not read as clean."""
+        return bool(self.named) or (self.strict and bool(self.in_dirs))
 
     def named_input(self, name, reason):
         self.named.append((name, reason))
@@ -136,7 +186,11 @@ class Skips:
             lines.append(f'NOT SCANNED: {len(self.named)} named input(s) were skipped (see stderr). A clean result does not cover them.')
         if self.in_dirs:
             parts = ', '.join(f'{n} {why}' for why, n in sorted(self.in_dirs.items()))
-            lines.append(f'Skipped {sum(self.in_dirs.values())} file(s) inside directories: {parts}.')
+            total = sum(self.in_dirs.values())
+            if self.strict:
+                lines.append(f'NOT SCANNED (--strict): {total} file(s) inside directories were skipped: {parts}. A clean result does not cover them.')
+            else:
+                lines.append(f'Skipped {total} file(s) inside directories: {parts}.')
         return lines
 
 
@@ -216,7 +270,13 @@ def scan_stdin(rules, name='<stdin>', max_bytes=LIMIT, stream=None, skips=None):
     skips = skips if skips is not None else Skips()
     name = clean_label(name)
     stream = stream or sys.stdin
-    if stream.isatty():
+    if stream is None:
+        raise ValueError('Standard input is closed, so there is nothing to scan')
+    try:
+        tty = stream.isatty()
+    except ValueError:
+        raise ValueError('Standard input is closed, so there is nothing to scan') from None
+    if tty:
         print('PortfolioGuard: reading standard input, press Ctrl-D (Ctrl-Z then Enter on Windows) to finish', file=sys.stderr)
     raw = getattr(stream, 'buffer', None)
     data = raw.read(max_bytes + 1) if raw else stream.read(max_bytes + 1).encode('utf-8')
@@ -445,6 +505,9 @@ def main(argv=None):
     p.add_argument('paths', nargs='*', metavar='path', help='Git repository to scan (default: .). With --files: files and directories to scan; - reads stdin')
     p.add_argument('--files', action='store_true', help='Scan the given files and directories without Git')
     p.add_argument('--stdin', action='store_true', help='Scan text from stdin without Git (same as a - path)')
+    p.add_argument('--strict', action='store_true', help='With --files/--stdin: files skipped inside directories (binary, over size, unreadable, special) also make the run exit 3')
+    p.add_argument('--profile', action='append', default=[], choices=sorted(PROFILES), metavar='NAME',
+                   help='Add an opt-in rule set (repeatable). Available: ' + ', '.join(sorted(PROFILES)) + '. Can also be set as profile = ["NAME"] in portfolioguard.toml')
     p.add_argument('--stdin-name', default='<stdin>', metavar='NAME', help='Name shown in findings for stdin (default: <stdin>)')
     m = p.add_mutually_exclusive_group()
     m.add_argument('--staged', action='store_true')
@@ -474,6 +537,8 @@ def main(argv=None):
                 raise ValueError('--files needs at least one path (or --stdin / -)')
             root = Path.cwd()
         else:
+            if a.strict:
+                raise ValueError('--strict only applies to --files / --stdin')
             if len(paths) > 1:
                 raise ValueError('Only one repository path is allowed (use --files to scan several paths)')
             root = get_root(Path(paths[0] if paths else '.').resolve())
@@ -489,11 +554,21 @@ def main(argv=None):
         max_bytes = LIMIT
         expected_identities = []
         allowed_email_values = []
+        profiles = list(a.profile)
+        drafts_cfg = {}
         if config.is_file():
             import tomllib
             with open(config, 'rb') as f:
                 data = tomllib.load(f)
             rules += [(x['name'], re.compile(x['pattern'])) for x in data.get('rules', [])]
+            cfg_profiles = data.get('profile', [])
+            if not isinstance(cfg_profiles, list) or not all(isinstance(x, str) and x in PROFILES for x in cfg_profiles):
+                raise ValueError('profile must be a list of known profile names: ' + ', '.join(sorted(PROFILES)))
+            profiles += cfg_profiles
+            drafts_cfg = data.get('drafts', {})
+            if not isinstance(drafts_cfg, dict) or not all(k in ('device_terms', 'overclaim_terms') and isinstance(v, list)
+                                                           and all(isinstance(t, str) and t for t in v) for k, v in drafts_cfg.items()):
+                raise ValueError('[drafts] may only hold device_terms and overclaim_terms, each a list of non-empty strings')
             allowed_email_values = data.get('allowed_email_values', [])
             if not isinstance(allowed_email_values, list) or not all(isinstance(x, str) and re.fullmatch(r'[^@\s]+@[^@\s]+', x) for x in allowed_email_values):
                 raise ValueError('allowed_email_values must be a list of email strings')
@@ -519,13 +594,14 @@ def main(argv=None):
                             raise ValueError(f'expected_identities[{i}].name must be a non-empty string when set')
                         item['name'] = entry['name']
                     expected_identities.append(item)
+        rules += profile_rules(profiles, drafts_cfg)
         for email in a.expect_email:
             expected_identities.append({'email': email})
         if a.max_bytes is not None:
             max_bytes = a.max_bytes
         if max_bytes < 0:
             raise ValueError('--max-bytes / max_file_bytes must be non-negative')
-        skips = Skips()
+        skips = Skips(a.strict)
         if outside_git:
             found = scan_paths(paths, rules, max_bytes, skip, skips)
             if use_stdin:
@@ -540,26 +616,34 @@ def main(argv=None):
         print(f'PortfolioGuard: {e}', file=sys.stderr)
         return 2
     allowed = [is_allowed(x, allow_entries) for x in found]
+    warned = [rule in WARNING_RULES and not ok for (_n, _l, rule, _s), ok in zip(found, allowed)]
+    issues = sum(not ok and not w for ok, w in zip(allowed, warned))
     if a.candidates:
         for name, line, rule, _source in found:
             print(f'{name}:{line}:{rule}')
     elif a.format == 'json':
-        print(json.dumps([{'source': s, 'path': n, 'line': ln, 'rule': rule, 'allowed': ok}
-                          for (n, ln, rule, s), ok in zip(found, allowed)], indent=2))
+        rows = [{'source': s, 'path': n, 'line': ln, 'rule': rule, 'allowed': ok}
+                for (n, ln, rule, s), ok in zip(found, allowed)]
+        if profiles:
+            for row, w in zip(rows, warned):
+                row['warning'] = w
+        print(json.dumps(rows, indent=2))
     else:
-        for (name, line, rule, source), ok in zip(found, allowed):
-            suffix = ' [allowed]' if ok else ''
+        for (name, line, rule, source), ok, w in zip(found, allowed, warned):
+            suffix = ' [allowed]' if ok else ' [warning]' if w else ''
             print(f'{source}: {name}:{line} [{rule}]{suffix}')
         if found:
-            print(f'\nFound {sum(not x for x in allowed)} non-allowlisted issue(s) across {len(found)} finding(s). Review locally before sharing.')
-        elif not skips.named:
+            print(f'\nFound {issues} non-allowlisted issue(s) across {len(found)} finding(s). Review locally before sharing.')
+            if any(warned):
+                print(f'{sum(warned)} warning(s) are word list hits to read, they do not change the exit code.')
+        elif not skips.failing:
             print('No configured patterns matched.')
     # Skips only exist in files mode. In text mode they are part of the report, otherwise they go to stderr.
     for line in skips.summary():
         print(line, file=sys.stdout if not (a.candidates or a.format == 'json') else sys.stderr)
-    if any(not x for x in allowed):
+    if issues:
         return 1
-    return EXIT_NOT_SCANNED if skips.named else 0
+    return EXIT_NOT_SCANNED if skips.failing else 0
 
 
 if __name__ == '__main__':

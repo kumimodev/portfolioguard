@@ -7,12 +7,13 @@ import socket
 import subprocess
 import sys
 import tempfile
+import time
 import unittest
 from unittest.mock import patch
 import shlex
 from pathlib import Path
 
-from portfolioguard import install_hook, is_allowed, load_allowlist, main, scan
+from portfolioguard import install_hook, is_allowed, load_allowlist, main, profile_rules, scan
 
 
 def run_git(root, *args, **kwargs):
@@ -740,6 +741,227 @@ class FilesModeTests(unittest.TestCase):
         self.assertIn('press Ctrl-D', err.getvalue())
         code, out, err = run_cli(['--stdin'], stdin='fine\n')
         self.assertEqual(err, '')
+
+    @unittest.skipUnless(os.name == 'posix', 'needs POSIX file descriptors')
+    def test_closed_stdin_is_a_clean_error(self):
+        script = Path(__file__).resolve().parent / 'portfolioguard.py'
+        for args in (['--stdin'], ['-'], ['--files', '-']):
+            with self.subTest(args=args):
+                done = subprocess.run([sys.executable, str(script), *args], cwd=self.dir, timeout=20,
+                                      stdout=subprocess.PIPE, stderr=subprocess.PIPE, preexec_fn=lambda: os.close(0))
+                err = done.stderr.decode()
+                self.assertEqual(done.returncode, 2)
+                self.assertTrue(err.startswith('PortfolioGuard: Standard input is closed'), err)
+                self.assertNotIn('Traceback', err)
+                self.assertEqual(done.stdout, b'')
+
+    def test_stdin_none_and_closed_stream_exit_two(self):
+        out, err = io.StringIO(), io.StringIO()
+        with contextlib.redirect_stdout(out), contextlib.redirect_stderr(err), patch('sys.stdin', None):
+            self.assertEqual(main(['--stdin']), 2)
+        self.assertIn('Standard input is closed', err.getvalue())
+        closed = io.StringIO()
+        closed.close()
+        err = io.StringIO()
+        with contextlib.redirect_stdout(io.StringIO()), contextlib.redirect_stderr(err), patch('sys.stdin', closed):
+            self.assertEqual(main(['--stdin']), 2)
+        self.assertIn('Standard input is closed', err.getvalue())
+
+    def test_strict_makes_directory_skips_fail(self):
+        self.write('d/ok.md', 'fine\n')
+        self.write('d/a.bin', b'\0abc')
+        self.write('d/utf16.md', 'fine\n'.encode('utf-16'))
+        code, out, _ = run_cli(['--files', 'd'], cwd=self.dir)
+        self.assertEqual(code, 0)
+        self.assertIn('Skipped 2 file(s) inside directories: 2 binary.', out)
+        code, out, err = run_cli(['--files', 'd', '--strict'], cwd=self.dir)
+        self.assertEqual(code, 3)
+        self.assertIn('NOT SCANNED (--strict): 2 file(s) inside directories were skipped: 2 binary.', out)
+        self.assertNotIn('No configured patterns matched.', out)
+        self.assertEqual(err, '')
+
+    def test_strict_with_nothing_skipped_and_with_findings(self):
+        self.write('clean/ok.md', 'fine\n')
+        code, out, _ = run_cli(['--files', 'clean', '--strict'], cwd=self.dir)
+        self.assertEqual((code, out.strip()), (0, 'No configured patterns matched.'))
+        self.write('mixed/b.md', LEAKY)
+        self.write('mixed/a.bin', b'\0abc')
+        code, out, _ = run_cli(['--files', 'mixed', '--strict'], cwd=self.dir)
+        self.assertEqual(code, 1)
+        self.assertIn('NOT SCANNED (--strict)', out)
+
+    def test_strict_counts_special_oversize_and_unreadable_but_not_symlinks(self):
+        self.write('d/big.md', LEAKY)
+        code, out, _ = run_cli(['--files', 'd', '--strict', '--max-bytes', '5'], cwd=self.dir)
+        self.assertEqual(code, 3)
+        self.assertIn('1 over size limit', out)
+        self.write('s/ok.md', 'fine\n')
+        try:
+            os.symlink(self.dir / 'd' / 'big.md', self.dir / 's' / 'link.md')
+        except (OSError, NotImplementedError):
+            self.skipTest('symlinks not available')
+        code, out, _ = run_cli(['--files', 's', '--strict'], cwd=self.dir)
+        self.assertEqual(code, 0)
+        if hasattr(os, 'mkfifo'):
+            os.mkfifo(self.dir / 's' / 'pipe')
+            code, out, _ = run_cli(['--files', 's', '--strict'], cwd=self.dir)
+            self.assertEqual(code, 3)
+            self.assertIn('1 not a regular file', out)
+
+    def test_strict_notice_goes_to_stderr_for_json_and_needs_files_mode(self):
+        self.write('d/a.bin', b'\0abc')
+        code, out, err = run_cli(['--files', 'd', '--strict', '--format', 'json'], cwd=self.dir)
+        self.assertEqual((code, json.loads(out)), (3, []))
+        self.assertIn('NOT SCANNED (--strict)', err)
+        code, out, err = run_cli(['--strict', str(self.dir)])
+        self.assertEqual((code, out), (2, ''))
+        self.assertIn('--strict only applies to --files / --stdin', err)
+
+
+DRAFT_FIXTURES = {
+    'private_ipv4': ['router 192.' + '168.42.5 here', 'host 10.' + '0.0.5.', 'x 172.' + '16.5.4 y', 'x 172.' + '31.255.255 y'],
+    'cgnat_ipv4': ['node 100.' + '64.0.1 up', 'node 100.' + '127.255.254 up'],
+    'tailscale_hostname': ['box.tail' + '1a2b3c.ts.net', 'http://laptop.' + 'ts.net/path'],
+    'mac_address': ['mac aa:bb:cc:dd:' + 'ee:ff', 'MAC AA-BB-CC-' + 'DD-EE-FF'],
+    'device_brand_model': ['a TP-Link router', 'an RE999 unit', 'Archer AX55', 'a Netgear box', 'TL-WR841N'],
+    'overclaim_word': ['this cannot fail', 'it is impossible', 'a guarantee for you', 'fully secure', 'works on the first try', '100% safe', 'always works'],
+}
+DRAFT_CLEAN = [
+    'public 8.8.8.8 and 172.' + '32.0.1 and 100.' + '63.1.1 and 100.' + '128.0.1',
+    'version 10.' + '0.19045.1234 and 10.' + '1.2.3.4',
+    'time 12:34:56 and ipv6 2001:db8:aa:bb:cc:dd:ee:ff12',
+    'host example.com and tailored and ts.net on its own',
+    'an orbit and a network and renew450 and RE45',
+    'not a guarantee, never fully, no secrets here, it is not secure',
+]
+
+
+class DraftProfileTests(unittest.TestCase):
+    def setUp(self):
+        self._tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self._tmp.cleanup)
+        self.dir = Path(self._tmp.name)
+
+    def candidates(self, text, *extra, cwd=None):
+        code, out, err = run_cli(['--stdin', '--candidates', *extra], stdin=text, cwd=cwd or self.dir)
+        return code, [x.split(':')[-1] for x in out.splitlines()], err
+
+    def test_profile_is_off_by_default(self):
+        for rule, samples in DRAFT_FIXTURES.items():
+            for text in samples:
+                with self.subTest(text=text):
+                    self.assertNotIn(rule, self.candidates(text)[1])
+
+    def test_each_rule_matches_its_fixtures(self):
+        for rule, samples in DRAFT_FIXTURES.items():
+            for text in samples:
+                with self.subTest(rule=rule, text=text):
+                    self.assertIn(rule, self.candidates(text, '--profile', 'drafts')[1])
+
+    def test_clean_lines_stay_quiet(self):
+        draft_rules = set(DRAFT_FIXTURES)
+        for text in DRAFT_CLEAN:
+            with self.subTest(text=text):
+                self.assertFalse(draft_rules & set(self.candidates(text, '--profile', 'drafts')[1]))
+
+    def test_output_never_echoes_matched_values(self):
+        text = '\n'.join(x[0] for x in DRAFT_FIXTURES.values())
+        for extra in ([], ['--format', 'json']):
+            code, out, _ = run_cli(['--stdin', '--profile', 'drafts', *extra], stdin=text)
+            for value in ('192.' + '168.42.5', 'ts.net', 'aa:bb:cc', 'cannot', 'TP' + '-Link', '100.' + '64.0.1'):
+                self.assertNotIn(value, out)
+
+    def test_overclaim_is_a_warning_and_does_not_fail_the_run(self):
+        code, out, _ = run_cli(['--stdin', '--profile', 'drafts'], stdin='this cannot fail\nalways works\n')
+        self.assertEqual(code, 0)
+        self.assertIn('stdin: <stdin>:1 [overclaim_word] [warning]', out)
+        self.assertIn('Found 0 non-allowlisted issue(s) across 2 finding(s).', out)
+        self.assertIn('2 warning(s) are word list hits to read, they do not change the exit code.', out)
+        code, out, _ = run_cli(['--stdin', '--profile', 'drafts'], stdin='this cannot fail\nrouter 192.' + '168.42.5\n')
+        self.assertEqual(code, 1)
+        self.assertIn('Found 1 non-allowlisted issue(s) across 2 finding(s).', out)
+
+    def test_allowlist_applies_to_profile_rules(self):
+        allow = self.dir / 'allow.txt'
+        allow.write_text('<stdin>:1:private_ipv4\n<stdin>:overclaim_word\n')
+        code, out, _ = run_cli(['--stdin', '--profile', 'drafts', '--allowlist', str(allow)], stdin='router 192.' + '168.42.5\nalways works\n')
+        self.assertEqual(code, 0)
+        self.assertIn('[private_ipv4] [allowed]', out)
+        self.assertIn('[overclaim_word] [allowed]', out)
+        self.assertNotIn('[warning]', out)
+
+    def test_json_gets_warning_key_only_when_a_profile_is_on(self):
+        code, out, _ = run_cli(['--stdin', '--format', 'json'], stdin=AWS_LINE + '\n')
+        self.assertEqual({tuple(sorted(x)) for x in json.loads(out)}, {('allowed', 'line', 'path', 'rule', 'source')})
+        code, out, _ = run_cli(['--stdin', '--format', 'json', '--profile', 'drafts'], stdin='always works\n' + AWS_LINE + '\n')
+        rows = {x['rule']: x for x in json.loads(out)}
+        self.assertIs(rows['overclaim_word']['warning'], True)
+        self.assertIs(rows['aws_access_key']['warning'], False)
+
+    def test_negated_overclaims_are_ignored_but_later_hits_count(self):
+        for text in ('not a guarantee', 'this is not fully done', 'there is no guarantee', "it isn't secure", 'never always'):
+            with self.subTest(text=text):
+                self.assertNotIn('overclaim_word', self.candidates(text, '--profile', 'drafts')[1])
+        self.assertIn('overclaim_word', self.candidates('not a guarantee, but it always works', '--profile', 'drafts')[1])
+
+    def test_config_profile_and_extra_terms(self):
+        (self.dir / 'portfolioguard.toml').write_text(
+            'profile = ["drafts"]\n[drafts]\ndevice_terms = ["Zyxel", "example-host"]\noverclaim_terms = ["flawless"]\n')
+        code, rules, _ = self.candidates('router at 192.' + '168.42.5\na Zyxel box\nexample-host vm\nflawless run\n')
+        self.assertEqual(rules, ['private_ipv4', 'device_brand_model', 'device_brand_model', 'overclaim_word'])
+        code, rules, _ = self.candidates('a Zyxel box', '--rules', str(self.dir / 'portfolioguard.toml'))
+        self.assertEqual(rules, ['device_brand_model'])
+        # without the profile the extra terms do nothing
+        (self.dir / 'plain.toml').write_text('[drafts]\ndevice_terms = ["Zyxel"]\n')
+        self.assertEqual(self.candidates('a Zyxel box', '--rules', str(self.dir / 'plain.toml'))[1], [])
+
+    def test_bad_profile_settings_exit_two(self):
+        for body in ('profile = ["nope"]\n', 'profile = "drafts"\n', '[drafts]\nwrong = ["x"]\n', '[drafts]\ndevice_terms = [1]\n'):
+            with self.subTest(body=body):
+                (self.dir / 'bad.toml').write_text(body)
+                code, out, err = run_cli(['--stdin', '--rules', str(self.dir / 'bad.toml')], stdin='x\n')
+                self.assertEqual(code, 2)
+                self.assertTrue(err.startswith('PortfolioGuard: '))
+        with self.assertRaises(SystemExit) as caught, contextlib.redirect_stderr(io.StringIO()):
+            main(['--stdin', '--profile', 'nope'])
+        self.assertEqual(caught.exception.code, 2)
+
+    def test_profile_works_in_git_modes_and_is_off_without_it(self):
+        repo = self.dir / 'repo'
+        subprocess.run(['git', 'init', '-q', str(repo)], check=True)
+        run_git(repo, 'config', 'user.email', 'fixture@example.test')
+        run_git(repo, 'config', 'user.name', 'Fixture')
+        (repo / 'notes.md').write_text('router 192.' + '168.42.5\n')
+        run_git(repo, 'add', '.')
+        run_git(repo, 'commit', '-m', 'fixture')
+        self.assertEqual(run_cli([str(repo)])[:2], (0, 'No configured patterns matched.\n'))
+        code, out, _ = run_cli([str(repo), '--profile', 'drafts'])
+        self.assertEqual(code, 1)
+        self.assertIn('working-tree: notes.md:1 [private_ipv4]', out)
+        code, out, _ = run_cli([str(repo), '--history', '--profile', 'drafts'])
+        self.assertRegex(out, r'history:[0-9a-f]{8}: notes\.md:1 \[private_ipv4\]')
+        code, out, _ = run_cli([str(repo), '--staged', '--profile', 'drafts'])
+        self.assertEqual(code, 0)
+
+    def test_files_mode_with_profile_over_a_directory(self):
+        (self.dir / 'drafts').mkdir()
+        (self.dir / 'drafts' / 'post.md').write_text('host box.tail' + '1a2b3c.ts.net\nthis cannot fail\n')
+        code, out, _ = run_cli(['--files', 'drafts', '--profile', 'drafts'], cwd=self.dir)
+        self.assertEqual(code, 1)
+        self.assertIn('files: drafts/post.md:1 [tailscale_hostname]', out)
+        self.assertIn('files: drafts/post.md:2 [overclaim_word] [warning]', out)
+
+    def test_drafts_profile_one_megabyte_dotted_line_does_not_hang(self):
+        # Regression for a quadratic tailscale_hostname pattern on a long dotted line.
+        # The drafts rules are scanned directly. A full CLI run also loads the default
+        # email_address rule, which is separately slow on dotted input and is unchanged.
+        text = 'a.' * 500000
+        self.assertEqual(len(text), 1_000_000)
+        started = time.perf_counter()
+        found = scan(text, 'fixture.txt', rules=profile_rules(['drafts']))
+        elapsed = time.perf_counter() - started
+        self.assertLess(elapsed, 3, f'drafts profile took {elapsed:.2f}s on a 1MB dotted line')
+        self.assertEqual(found, [])
 
 
 class InRepoUnchangedTests(unittest.TestCase):

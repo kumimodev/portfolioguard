@@ -23,3 +23,11 @@
 # [[expected_identities]]
 # email = "dev@example.com"
 # name = "Dev Example"
+
+# Optional opt-in rule set for Markdown drafts (also available as --profile drafts).
+# Put this line above any [table] headers. See the README for the rule list.
+# profile = ["drafts"]
+# Extra terms that extend the built in lists when the profile is on (whole words, any case):
+# [drafts]
+# device_terms = ["ExampleBrand"]
+# overclaim_terms = ["flawless"]
