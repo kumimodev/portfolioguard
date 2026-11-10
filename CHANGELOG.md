@@ -12,6 +12,7 @@
 9. New `--strict` flag for files mode: files skipped inside directories (binary, UTF-16, over the size cap, unreadable, special) make the run exit `3`, like a skipped named input. The default is unchanged.
 10. The README now has a prominent note that exit `3` is not `1`, so scripts should treat any non-zero code as not clean.
 11. New opt-in `drafts` profile (`--profile drafts` or `profile = ["drafts"]` in the config) with rules for private and carrier grade NAT IPv4 addresses, `.ts.net` hostnames, MAC addresses, home networking device brands and models, and an overclaim word list that only warns. Custom terms can be added under `[drafts]`. Default scans are unchanged.
+12. The built in `email_address` rule now matches in linear time, so a long dotted line no longer hangs a scan. What it detects is unchanged.
 
 ## 0.3.1, 1 Nov 2026
 1. Ignore SVG coordinate data and LinkedIn activity or share URNs in phone number checks while keeping ordinary phone detection enabled.

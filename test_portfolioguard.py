@@ -13,7 +13,7 @@ from unittest.mock import patch
 import shlex
 from pathlib import Path
 
-from portfolioguard import install_hook, is_allowed, load_allowlist, main, profile_rules, scan
+from portfolioguard import EmailPattern, install_hook, is_allowed, load_allowlist, main, profile_rules, scan
 
 
 def run_git(root, *args, **kwargs):
@@ -385,6 +385,83 @@ class ScannerTests(unittest.TestCase):
             self.assertIn('unexpected-commit-identity', body)
             self.assertIn('author:odd@example.com', body)
             self.assertNotIn('committer:dev@example.com', body)
+
+
+class EmailAddressTests(unittest.TestCase):
+    def test_default_email_rule_one_megabyte_dotted_line_does_not_hang(self):
+        # Regression for a quadratic email_address pattern on a long dotted line with no @.
+        payload = 'a.' * 500000
+        self.assertEqual(len(payload), 1_000_000)
+        script = Path(__file__).resolve().parent / 'portfolioguard.py'
+        try:
+            done = subprocess.run(
+                [sys.executable, str(script), '--stdin', '--max-bytes', '1000000'],
+                input=payload.encode(), timeout=5,
+                stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+            )
+        except subprocess.TimeoutExpired:
+            self.fail('default email rule hung on a 1MB dotted line')
+        self.assertEqual(done.returncode, 0)
+        self.assertNotIn(b'[', done.stdout)
+
+    def test_email_address_matches_legacy_pattern(self):
+        legacy = re.compile(r'\b[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}\b')
+        pat = EmailPattern()
+        samples = [
+            'a@b@c.com', 'user@foo.bar.com', 'user@foo.com.', 'user@foo.com_x',
+            '...user@host.com', '-user@host.com', '_user@host.com', '%user@host.com',
+            'a.@host.com', '!.@host.com', 'user@.com', 'user@localhost', 'user@foo.c',
+            'user@foo.com2', 'user@127.0.0.1', 'User@Foo.COM', 'user@foo.bar-baz',
+            'user@host.comx', 'éuser@host.com', 'user@host.comé', 'α.c6+.@ymZcq3f4.yOZ',
+            'H%zHi7Grt@vP.ofGa', 'hello@kumimo.dev.evil@x.com', 'mailto:user@host.com',
+        ]
+        for text in samples:
+            with self.subTest(text=text):
+                old, new = legacy.search(text), pat.search(text)
+                self.assertEqual(
+                    None if old is None else (old.group(), old.start(), old.end()),
+                    None if new is None else (new.group(), new.start(), new.end()),
+                )
+
+    def test_allowed_email_values_keep_legacy_skip_behaviour(self):
+        legacy = re.compile(
+            r'(?i)\b(?!(?:hello@example.test)\b)[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}\b')
+        pat = EmailPattern(['hello@example.test'])
+        samples = [
+            'hello@example.test', 'HELLO@EXAMPLE.TEST',
+            'hello@example.test private.person@gmail.com',
+            'hello@example.test.evil@x.com', 'xhello@example.test',
+            'hello@example.te\u017ft', 'hello@example.te\u0131est',
+            '\u017fello@example.test', 'hello@example.te\u212at',
+        ]
+        for text in samples:
+            with self.subTest(text=text):
+                old, new = legacy.search(text), pat.search(text)
+                self.assertEqual(
+                    None if old is None else (old.group(), old.start(), old.end()),
+                    None if new is None else (new.group(), new.start(), new.end()),
+                )
+
+    def test_allowed_email_values_one_megabyte_line_does_not_hang(self):
+        # Regression for quadratic allowed-value skipping on a long line of repeats.
+        unit = 'hello@example.test '
+        payload = (unit * 52632)[:1_000_000]
+        self.assertEqual(len(payload), 1_000_000)
+        script = Path(__file__).resolve().parent / 'portfolioguard.py'
+        with tempfile.TemporaryDirectory() as tmp:
+            rules = Path(tmp) / 'rules.toml'
+            rules.write_text('allowed_email_values = ["hello@example.test"]\n')
+            try:
+                done = subprocess.run(
+                    [sys.executable, str(script), '--stdin', '--rules', str(rules),
+                     '--max-bytes', '1000000'],
+                    input=payload.encode(), timeout=5,
+                    stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+                )
+            except subprocess.TimeoutExpired:
+                self.fail('allowed email rule hung on a 1MB repeated address line')
+        self.assertEqual(done.returncode, 0)
+        self.assertNotIn(b'[', done.stdout)
 
 
 AWS_LINE = 'key=' + 'AKIA' + 'EXAMPLEKEY123456'
@@ -953,15 +1030,20 @@ class DraftProfileTests(unittest.TestCase):
 
     def test_drafts_profile_one_megabyte_dotted_line_does_not_hang(self):
         # Regression for a quadratic tailscale_hostname pattern on a long dotted line.
-        # The drafts rules are scanned directly. A full CLI run also loads the default
-        # email_address rule, which is separately slow on dotted input and is unchanged.
-        text = 'a.' * 500000
-        self.assertEqual(len(text), 1_000_000)
-        started = time.perf_counter()
-        found = scan(text, 'fixture.txt', rules=profile_rules(['drafts']))
-        elapsed = time.perf_counter() - started
-        self.assertLess(elapsed, 3, f'drafts profile took {elapsed:.2f}s on a 1MB dotted line')
-        self.assertEqual(found, [])
+        payload = 'a.' * 500000
+        self.assertEqual(len(payload), 1_000_000)
+        script = Path(__file__).resolve().parent / 'portfolioguard.py'
+        try:
+            done = subprocess.run(
+                [sys.executable, str(script), '--stdin', '--profile', 'drafts',
+                 '--max-bytes', '1000000'],
+                input=payload.encode(), timeout=5,
+                stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+            )
+        except subprocess.TimeoutExpired:
+            self.fail('drafts profile hung on a 1MB dotted line')
+        self.assertEqual(done.returncode, 0)
+        self.assertNotIn(b'[', done.stdout)
 
 
 class InRepoUnchangedTests(unittest.TestCase):

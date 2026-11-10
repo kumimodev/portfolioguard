@@ -29,6 +29,138 @@ def _mykad_pb_codes():
 MYKAD_PB_CODES = _mykad_pb_codes()
 _MYKAD_CONTEXT = re.compile(r'(?i)\b(?:mykad|nric|ic(?:\s*no(?:\.?|mber)?)?|malaysia(?:n)?\s+ic)\b')
 
+# Linear stand-in for the old email regex r'\b[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}\b'.
+# Anchoring on '@' keeps the same hits and avoids a hang on a long dotted line with no '@'.
+_EMAIL_LOCAL = frozenset('ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789._%+-')
+_EMAIL_DOMAIN = frozenset('ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789.-')
+_EMAIL_LETTER = frozenset('ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz')
+_WORD_RE = re.compile(r'\w')
+# Python re.IGNORECASE also folds these four onto ASCII s, k, i and i.
+# allowed_email_values uses that flag, so the linear matcher follows it there.
+_EMAIL_SPECIAL = frozenset('\u017f\u212a\u0130\u0131')
+_EMAIL_FOLD = str.maketrans({
+    '\u017f': 's',
+    '\u212a': 'k',
+    '\u0130': 'i',
+    '\u0131': 'i',
+})
+
+
+def _fold_email(text):
+    return text.translate(_EMAIL_FOLD).lower()
+
+
+def _is_word(ch):
+    return _WORD_RE.match(ch) is not None
+
+
+def _is_boundary(line, i):
+    """True if a regex \\b would match at index i, using Unicode word characters."""
+    left = i > 0 and _is_word(line[i - 1])
+    right = i < len(line) and _is_word(line[i])
+    return left != right
+
+
+class _EmailMatch:
+    __slots__ = ('_text', '_start', '_end')
+
+    def __init__(self, text, start, end):
+        self._text, self._start, self._end = text, start, end
+
+    def group(self, *args):
+        return self._text
+
+    def start(self, *args):
+        return self._start
+
+    def end(self, *args):
+        return self._end
+
+
+def search_email(line, begin=0, special=None):
+    """First email in line at or after begin. Same hits as the old quadratic regex.
+
+    special is an extra set of letters treated as local, domain and TLD
+    characters. allowed_email_values passes _EMAIL_SPECIAL so the matcher
+    follows the IGNORECASE folds of the previous regex.
+    """
+    if not special:
+        special = frozenset()
+    local = _EMAIL_LOCAL | special
+    domain = _EMAIL_DOMAIN | special
+    letter = _EMAIL_LETTER | special
+    n = len(line)
+    pos = begin
+    while True:
+        at = line.find('@', pos)
+        if at < 0:
+            return None
+        if at == 0 or line[at - 1] not in local:
+            pos = at + 1
+            continue
+        loc = at - 1
+        while loc >= begin and line[loc] in local:
+            loc -= 1
+        loc += 1
+        while loc < at and not _is_boundary(line, loc):
+            loc += 1
+        if loc >= at:
+            pos = at + 1
+            continue
+        if at + 1 >= n or line[at + 1] not in domain:
+            pos = at + 1
+            continue
+        run_end = at + 1
+        while run_end < n and line[run_end] in domain:
+            run_end += 1
+        end = None
+        i = run_end - 1
+        while i >= at + 2:
+            if line[i] == '.':
+                j = i + 1
+                while j < run_end and line[j] in letter:
+                    j += 1
+                if j - i - 1 >= 2 and _is_boundary(line, j):
+                    end = j
+                    break
+            i -= 1
+        if end is None:
+            pos = at + 1
+            continue
+        return _EmailMatch(line[loc:end], loc, end)
+
+
+class EmailPattern:
+    """Linear matcher with the same hits as the old email_address regex.
+
+    ignore is a list of exact, case insensitive values to skip, matching
+    allowed_email_values: a hit is skipped when the allowed value sits at the
+    start of the match and is followed by a word boundary.
+    """
+
+    def __init__(self, ignore=()):
+        self.ignore = tuple(_fold_email(x) for x in ignore)
+        self.special = _EMAIL_SPECIAL if self.ignore else frozenset()
+
+    def search(self, line):
+        begin = 0
+        while True:
+            match = search_email(line, begin, special=self.special)
+            if match is None:
+                return None
+            start = match.start()
+            if any(
+                start + len(email) <= len(line)
+                and _fold_email(line[start:start + len(email)]) == email
+                and _is_boundary(line, start + len(email))
+                for email in self.ignore
+            ):
+                begin = start + 1
+                continue
+            return match
+
+
+
 RULES = [
     ('private_key', ('-----' + 'BEGIN' + ' (?:RSA |EC |OPENSSH |DSA )?PRIVATE KEY-----')),
     ('aws_access_key', r'\b(?:AKIA|ASIA)[A-Z0-9]{16}\b'),
@@ -44,7 +176,7 @@ RULES = [
     ('generic_secret_assignment', r"""(?i)(?:^|[^A-Za-z0-9])["']?(?:[A-Za-z0-9]+[_-])*(?:api[_-]?key|secret|password|passwd|token|client[_-]?secret)["']?\s*[:=]\s*["']?([A-Za-z0-9_./+=-]{8,})"""),
     ('nric_fin', r'(?<![A-Za-z0-9])[STFGM]\d{7}[A-Z](?![A-Za-z0-9])'),
     ('mykad', r'(?<![A-Za-z0-9])(?:\d{6}-\d{2}-\d{4}|\d{12})(?![A-Za-z0-9])'),
-    ('email_address', r'\b[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}\b'),
+    ('email_address', EmailPattern()),
     ('phone_number', r'(?<![\w-])(?:\+\d[\d .()\-]{8,}\d|\d[\d .()\-]{8,}\d)(?![\w-])'),
 ]
 
@@ -121,7 +253,7 @@ def scan(text, name, rules=RULES, source='working-tree'):
     found = []
     for n, line in enumerate(text.splitlines(), 1):
         for label, pattern in rules:
-            match = re.search(pattern, line)
+            match = pattern.search(line) if hasattr(pattern, 'search') else re.search(pattern, line)
             if not match:
                 continue
             if label == 'overclaim_word':
@@ -546,7 +678,7 @@ def main(argv=None):
             hook = install_hook(root, a.force)
             print(f'Installed PortfolioGuard pre-push hook: {hook}')
             return 0
-        rules = [(n, re.compile(x)) for n, x in RULES]
+        rules = [(n, x if hasattr(x, 'search') else re.compile(x)) for n, x in RULES]
         config = Path(a.rules).resolve() if a.rules else (root / 'portfolioguard.toml' if (root / 'portfolioguard.toml').is_file() else Path(__file__).resolve().parent / 'portfolioguard.toml')
         if a.rules and not config.is_file():
             raise ValueError(f'Rules file not found: {config}')
@@ -573,8 +705,7 @@ def main(argv=None):
             if not isinstance(allowed_email_values, list) or not all(isinstance(x, str) and re.fullmatch(r'[^@\s]+@[^@\s]+', x) for x in allowed_email_values):
                 raise ValueError('allowed_email_values must be a list of email strings')
             if allowed_email_values:
-                escaped = '|'.join(re.escape(x) for x in allowed_email_values)
-                rules = [(n, re.compile(r'(?i)\b(?!(?:' + escaped + r')\b)[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}\b') if n == 'email_address' else p) for n, p in rules]
+                rules = [(n, EmailPattern(allowed_email_values) if n == 'email_address' else p) for n, p in rules]
             if 'skip_dirs' in data:
                 if not isinstance(data['skip_dirs'], list) or not all(isinstance(x, str) for x in data['skip_dirs']):
                     raise ValueError('skip_dirs must be a list of directory name strings')
