@@ -1,5 +1,13 @@
 # Changelog
 
+## Unreleased
+1. New files mode: `--files PATH...` scans files and directories without Git, so loose drafts outside a repository can be checked.
+2. Standard input scanning with `--stdin` or a `-` path, and `--stdin-name NAME` to label findings.
+3. Same rules, allowlist matching, text and JSON output, `--candidates` and exit codes as repo scans. Findings carry a `files` or `stdin` source label.
+4. Skips for size and binary files work as before. A skipped file or stdin that you named is reported on stderr instead of passing silently.
+5. The Git repository not found error now points to `--files` and `--stdin`. Scans inside a repository behave as before.
+6. Added tests for files and stdin scanning, allowlists, config, errors, and unchanged repository scans.
+
 ## 0.3.1, 1 Nov 2026
 1. Ignore SVG coordinate data and LinkedIn activity or share URNs in phone number checks while keeping ordinary phone detection enabled.
 2. Added exact, case insensitive `allowed_email_values` for intentional public contact addresses and documented the GitHub Pages visibility of committed allowlists.

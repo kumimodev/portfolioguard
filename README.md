@@ -28,6 +28,26 @@ By default it skips directories named `.git`, `node_modules`, `dist`, `build`, `
 
 Exit codes: `0` means nothing outside the allowlist turned up, `1` means something needs a look, `2` means the scan or install couldn't run.
 
+## Scan files outside a git repo
+
+For loose files that aren't in a repository (drafts, notes, a folder you are about to upload), use files mode. It never runs Git, so it works anywhere:
+```sh
+python /path/to/PortfolioGuard/portfolioguard.py --files drafts/post.md         # one file
+python /path/to/PortfolioGuard/portfolioguard.py --files drafts/ notes/todo.md  # directories and files
+cat drafts/post.md | python /path/to/PortfolioGuard/portfolioguard.py --stdin  # standard input
+python /path/to/PortfolioGuard/portfolioguard.py --files notes.md -             # a file plus stdin
+```
+
+1. `--files PATH...` takes files and directories. `--stdin` (or a lone `-` in the path list) reads text from standard input and also turns files mode on. `--stdin-name NAME` sets the name shown for stdin findings (default `<stdin>`).
+2. Directories are searched recursively in a stable sorted order. Symlinks found inside a directory are ignored, and a file reached twice is scanned once. Sub directories with a skipped name (the same defaults and `skip_dirs` setting as above) are not entered. A directory you name yourself is still scanned, so `--files dist` works, but a `node_modules` inside it is not.
+3. Findings use the same rules, output lines, `--format json`, `--candidates` and exit codes (`0`, `1`, `2`) as repo scans. Only the source label changes: `files` for paths and `stdin` for standard input, for example `files: drafts/post.md:12 [email_address]`.
+4. The name shown is the path as you typed it, tidied (`./drafts/../drafts/post.md` becomes `drafts/post.md`), with `/` separators. For a directory it is the directory you gave plus the path inside it. Absolute paths stay absolute.
+5. The size cap and binary skip work as in repo mode (`--max-bytes`, `max_file_bytes`). For a file or stdin you named yourself, a skip is not silent: a line such as `PortfolioGuard: skipped drafts/big.md (over size limit)` goes to stderr, so a skipped file isn't mistaken for a clean one. A path that doesn't exist is an error (exit `2`).
+6. There is no repository root, so the current directory plays that part. `.portfolioguard-allowlist` and `portfolioguard.toml` are read from it (the usual fallback to the config next to `portfolioguard.py` still applies), or use `--allowlist PATH` and `--rules PATH`. An exact allowlist entry must match the name as printed, so use `drafts/post.md:12:email_address` when you pass `drafts/post.md`. Glob entries such as `drafts/*.md:email_address` match as before.
+7. Files mode can't be combined with `--staged`, `--history`, `--range`, `--pre-push` or `--install-hook`. Without `--files` or `--stdin`, nothing changes: PortfolioGuard still needs a Git repository.
+
+A clean run only means these patterns didn't match, so it's still a second look and not a guarantee.
+
 ## Warning: skipped paths are not “clean”
 
 PortfolioGuard does **not** scan the default skipped folders, or files over the size cap. Those can still get committed and published. Things that catch people out:
