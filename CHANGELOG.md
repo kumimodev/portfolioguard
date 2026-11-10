@@ -14,6 +14,7 @@
 11. New opt-in `drafts` profile (`--profile drafts` or `profile = ["drafts"]` in the config) with rules for private and carrier grade NAT IPv4 addresses, `.ts.net` hostnames, MAC addresses, home networking device brands and models, and an overclaim word list that only warns. Custom terms can be added under `[drafts]`. Default scans are unchanged.
 12. The built in `email_address` rule now matches in linear time, so a long dotted line no longer hangs a scan. What it detects is unchanged.
 13. The built in `generic_secret_assignment` rule now matches in linear time, so a long hyphen or underscore run no longer hangs a scan. What it detects is unchanged.
+14. The built in `phone_number` rule now matches in linear time, so a long line of repeated digits and hyphens such as ` 1-1-1-` no longer hangs a scan. What it detects is unchanged.
 
 ## 0.3.1, 1 Nov 2026
 1. Ignore SVG coordinate data and LinkedIn activity or share URNs in phone number checks while keeping ordinary phone detection enabled.

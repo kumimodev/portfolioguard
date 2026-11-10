@@ -13,7 +13,7 @@ from unittest.mock import patch
 import shlex
 from pathlib import Path
 
-from portfolioguard import EmailPattern, SecretPattern, install_hook, is_allowed, load_allowlist, main, profile_rules, scan
+from portfolioguard import EmailPattern, PhonePattern, SecretPattern, install_hook, is_allowed, load_allowlist, main, profile_rules, scan
 
 
 def run_git(root, *args, **kwargs):
@@ -602,6 +602,54 @@ def run_cli(args, stdin=None, cwd=None):
     finally:
         os.chdir(old)
     return code, out.getvalue(), err.getvalue()
+
+
+class PhoneNumberTests(unittest.TestCase):
+    LEGACY = re.compile(r'(?<![\w-])(?:\+\d[\d .()\-]{8,}\d|\d[\d .()\-]{8,}\d)(?![\w-])')
+
+    def _span(self, match):
+        return None if match is None else (match.start(), match.end(), match.group())
+
+    def test_phone_matches_legacy_pattern(self):
+        pat = PhonePattern()
+        samples = [
+            'Call +44 (20) 1234 5678', 'Call +44 (20) 1234 5678.', 'x+1234567890', ' +1234567890', '+1234567890',
+            '1234567890', '123456789', '12345678-', '1234567890-', '1234567890 -', '-1234567890', 'a1234567890',
+            '1234567890a', '1234567890_', '1234567890\u00e9', '+ 1234567890', '++1234567890', '12 34 56 78 90',
+            '(12) 3456-7890', '555-1234-5678 and 555.123.4567', '1-1-1-1-1-1-1-1-1-1-1', ' 1-1-1-1-1-1-1-1-1-1-1',
+            '\u0663\u0663\u0663\u0663\u0663\u0663\u0663\u0663\u0663\u0663', 'x 1234567890 y', '1234567890)', '(1234567890',
+            '12345678901234567890-', 'abc 12345678-9 12345678-9 1234567890', '', ' ', '+', '1' * 9, '1' * 10, '1 ' * 5,
+        ]
+        for text in samples:
+            with self.subTest(text=text):
+                self.assertEqual(self._span(pat.search(text)), self._span(self.LEGACY.search(text)))
+
+    def test_phone_matches_legacy_pattern_on_seeded_random_strings(self):
+        import random
+        rng = random.Random(20261111)
+        alphabet = list('0112 9a_-+.()\u00e9\u0663') + [' ', '-', ' ']
+        pat = PhonePattern()
+        for _ in range(20000):
+            text = ''.join(rng.choice(alphabet) for _ in range(rng.randint(0, 28)))
+            self.assertEqual(self._span(pat.search(text)), self._span(self.LEGACY.search(text)), text)
+
+    def test_phone_one_megabyte_separator_lines_do_not_hang(self):
+        # Regression for a quadratic phone_number regex on a line such as ' 1-1-1-'.
+        script = Path(__file__).resolve().parent / 'portfolioguard.py'
+        for unit in (' 1-', ' 123-', ' 123456789-'):
+            payload = (unit * (1_000_000 // len(unit) + 1))[:1_000_000]
+            self.assertEqual(len(payload), 1_000_000)
+            with self.subTest(unit=unit):
+                try:
+                    done = subprocess.run(
+                        [sys.executable, str(script), '--stdin', '--max-bytes', '1000000'],
+                        input=payload.encode(), timeout=10,
+                        stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+                    )
+                except subprocess.TimeoutExpired:
+                    self.fail(f'phone_number rule hung on a 1MB {unit!r} line')
+                self.assertEqual(done.returncode, 0)
+                self.assertNotIn(b'[', done.stdout)
 
 
 class FilesModeTests(unittest.TestCase):

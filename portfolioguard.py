@@ -253,6 +253,59 @@ class SecretPattern:
 
 
 
+# Linear stand-in for the old phone regex
+# r'(?<![\w-])(?:\+\d[\d .()\-]{8,}\d|\d[\d .()\-]{8,}\d)(?![\w-])'.
+# The old pattern retried every digit start and backtracked over the whole run, which
+# was quadratic on a line such as " 1-1-1-". Here each maximal run of phone
+# characters is read once. Every start in a run shares the same best end, so only the
+# first valid start and the last valid end of the run matter.
+_PHONE_RUN_RE = re.compile(r'[\d .()\-]+')
+_PHONE_GAP = frozenset(' .()')
+
+
+def search_phone(line):
+    """First phone number hit in line. Same spans as the old quadratic regex."""
+    n = len(line)
+    for run in _PHONE_RUN_RE.finditer(line):
+        a, r = run.start(), run.end()
+        if r - a < 10:
+            continue
+        # Largest end e: a digit that is followed by a gap character inside the run,
+        # or that ends the run with a non word character (or the line end) after it.
+        end = -1
+        for e in range(r - 1, a + 8, -1):
+            if not line[e].isdecimal():
+                continue
+            if e + 1 < r:
+                if line[e + 1] in _PHONE_GAP:
+                    end = e
+                    break
+            elif r >= n or not _is_word(line[r]):
+                end = e
+                break
+        if end < 0:
+            continue
+        # First start: a digit whose previous character is not a word character or hyphen.
+        for p in range(a, end - 8):
+            if line[p].isdecimal() and (p == 0 or not (_is_word(line[p - 1]) or line[p - 1] == '-')):
+                start = p
+                break
+        else:
+            continue
+        if start == a and a > 0 and line[a - 1] == '+' and (a == 1 or not (_is_word(line[a - 2]) or line[a - 2] == '-')):
+            start = a - 1
+        return _EmailMatch(line[start:end + 1], start, end + 1)
+    return None
+
+
+class PhonePattern:
+    """Linear matcher with the same hits as the old phone_number regex."""
+
+    def search(self, line):
+        return search_phone(line)
+
+
+
 RULES = [
     ('private_key', ('-----' + 'BEGIN' + ' (?:RSA |EC |OPENSSH |DSA )?PRIVATE KEY-----')),
     ('aws_access_key', r'\b(?:AKIA|ASIA)[A-Z0-9]{16}\b'),
@@ -269,7 +322,7 @@ RULES = [
     ('nric_fin', r'(?<![A-Za-z0-9])[STFGM]\d{7}[A-Z](?![A-Za-z0-9])'),
     ('mykad', r'(?<![A-Za-z0-9])(?:\d{6}-\d{2}-\d{4}|\d{12})(?![A-Za-z0-9])'),
     ('email_address', EmailPattern()),
-    ('phone_number', r'(?<![\w-])(?:\+\d[\d .()\-]{8,}\d|\d[\d .()\-]{8,}\d)(?![\w-])'),
+    ('phone_number', PhonePattern()),
 ]
 
 
