@@ -5,12 +5,14 @@ import os
 import re
 import shutil
 import shlex
+import stat
 import subprocess
 import sys
 from pathlib import Path
 
 VERSION = "0.3.1"
 LIMIT = 1_000_000
+EXIT_NOT_SCANNED = 3
 SKIP = {'.git', 'node_modules', 'dist', 'build', '.venv', 'venv', '__pycache__', '.idea', '.vscode'}
 
 # Malaysian MyKad birthplace codes (state + overseas). Source: Jabatan Pendaftaran Negara
@@ -105,33 +107,59 @@ def scan(text, name, rules=RULES, source='working-tree'):
     return found
 
 
+def clean_label(text):
+    """Replace newlines and other control characters so a name cannot fake output lines."""
+    return re.sub(r'[\x00-\x1f\x7f-\x9f]', '?', text)
+
+
 def display_name(path):
-    return os.path.normpath(str(path)).replace(os.sep, '/')
+    return clean_label(os.path.normpath(str(path)).replace(os.sep, '/'))
 
 
-def skip_note(name, reason):
-    print(f'PortfolioGuard: skipped {name} ({reason})', file=sys.stderr)
+class Skips:
+    """Inputs that were not scanned. Named ones are reported one by one, directory ones are counted."""
+
+    def __init__(self):
+        self.named = []
+        self.in_dirs = {}
+
+    def named_input(self, name, reason):
+        self.named.append((name, reason))
+        print(f'PortfolioGuard: skipped {name} ({reason})', file=sys.stderr)
+
+    def in_dir(self, reason):
+        self.in_dirs[reason] = self.in_dirs.get(reason, 0) + 1
+
+    def summary(self):
+        lines = []
+        if self.named:
+            lines.append(f'NOT SCANNED: {len(self.named)} named input(s) were skipped (see stderr). A clean result does not cover them.')
+        if self.in_dirs:
+            parts = ', '.join(f'{n} {why}' for why, n in sorted(self.in_dirs.items()))
+            lines.append(f'Skipped {sum(self.in_dirs.values())} file(s) inside directories: {parts}.')
+        return lines
 
 
-def read_text_file(path, name, max_bytes):
-    """Return decoded text for an explicitly named file, or None after a stderr note."""
+def read_text_file(path, name, max_bytes, skips):
+    """Return decoded text for an explicitly named file, or None after recording the skip."""
     try:
         if path.stat().st_size > max_bytes:
-            skip_note(name, 'over size limit')
+            skips.named_input(name, 'over size limit')
             return None
         data = path.read_bytes()
     except OSError:
-        skip_note(name, 'unreadable')
+        skips.named_input(name, 'unreadable')
         return None
     if not is_text(data):
-        skip_note(name, 'binary')
+        skips.named_input(name, 'binary')
         return None
     return data.decode('utf-8', 'replace')
 
 
-def scan_paths(paths, rules, max_bytes=LIMIT, skip=None):
+def scan_paths(paths, rules, max_bytes=LIMIT, skip=None, skips=None):
     """Scan files and directories without Git. Names are the paths as given, normalised."""
     dirs = SKIP if skip is None else skip
+    skips = skips if skips is not None else Skips()
     found, seen = [], set()
     for arg in paths:
         top = Path(arg)
@@ -141,7 +169,16 @@ def scan_paths(paths, rules, max_bytes=LIMIT, skip=None):
                 for filename in sorted(names):
                     p = Path(folder, filename)
                     rel = p.relative_to(top)
-                    if p.is_symlink() or skipped(rel, dirs):
+                    try:
+                        mode = p.lstat().st_mode
+                    except OSError:
+                        skips.in_dir('unreadable')
+                        continue
+                    if stat.S_ISLNK(mode) or skipped(rel, dirs):
+                        continue
+                    if not stat.S_ISREG(mode):
+                        # FIFOs, sockets and devices can block forever on read, so never open them
+                        skips.in_dir('not a regular file')
                         continue
                     real = os.path.realpath(p)
                     if real in seen:
@@ -149,37 +186,45 @@ def scan_paths(paths, rules, max_bytes=LIMIT, skip=None):
                     seen.add(real)
                     try:
                         if p.stat().st_size > max_bytes:
+                            skips.in_dir('over size limit')
                             continue
                         data = p.read_bytes()
                     except OSError:
+                        skips.in_dir('unreadable')
                         continue
                     if is_text(data):
                         found += scan(data.decode('utf-8', 'replace'), display_name(p), rules, 'files')
+                    else:
+                        skips.in_dir('binary')
         elif top.is_file():
             real = os.path.realpath(top)
             if real in seen:
                 continue
             seen.add(real)
             name = display_name(top)
-            text = read_text_file(top, name, max_bytes)
+            text = read_text_file(top, name, max_bytes, skips)
             if text is not None:
                 found += scan(text, name, rules, 'files')
         elif top.exists():
-            raise ValueError(f'Not a file or directory: {arg}')
+            raise ValueError(f'Not a file or directory: {clean_label(str(arg))}')
         else:
-            raise ValueError(f'Path not found: {arg}')
+            raise ValueError(f'Path not found: {clean_label(str(arg))}')
     return found
 
 
-def scan_stdin(rules, name='<stdin>', max_bytes=LIMIT, stream=None):
+def scan_stdin(rules, name='<stdin>', max_bytes=LIMIT, stream=None, skips=None):
+    skips = skips if skips is not None else Skips()
+    name = clean_label(name)
     stream = stream or sys.stdin
+    if stream.isatty():
+        print('PortfolioGuard: reading standard input, press Ctrl-D (Ctrl-Z then Enter on Windows) to finish', file=sys.stderr)
     raw = getattr(stream, 'buffer', None)
     data = raw.read(max_bytes + 1) if raw else stream.read(max_bytes + 1).encode('utf-8')
     if len(data) > max_bytes:
-        skip_note(name, 'over size limit')
+        skips.named_input(name, 'over size limit')
         return []
     if not is_text(data):
-        skip_note(name, 'binary')
+        skips.named_input(name, 'binary')
         return []
     return scan(data.decode('utf-8', 'replace'), name, rules, 'stdin')
 
@@ -480,10 +525,11 @@ def main(argv=None):
             max_bytes = a.max_bytes
         if max_bytes < 0:
             raise ValueError('--max-bytes / max_file_bytes must be non-negative')
+        skips = Skips()
         if outside_git:
-            found = scan_paths(paths, rules, max_bytes, skip)
+            found = scan_paths(paths, rules, max_bytes, skip, skips)
             if use_stdin:
-                found += scan_stdin(rules, a.stdin_name, max_bytes)
+                found += scan_stdin(rules, a.stdin_name, max_bytes, skips=skips)
         else:
             found = pre_push(root, rules, max_bytes=max_bytes, skip=skip) if a.pre_push else commit_range(root, [a.revision_range], rules, max_bytes, skip) if a.revision_range else staged(root, rules, max_bytes, skip) if a.staged else history(root, rules, max_bytes, skip) if a.history else working(root, rules, max_bytes, skip)
         if a.history and expected_identities:
@@ -506,9 +552,14 @@ def main(argv=None):
             print(f'{source}: {name}:{line} [{rule}]{suffix}')
         if found:
             print(f'\nFound {sum(not x for x in allowed)} non-allowlisted issue(s) across {len(found)} finding(s). Review locally before sharing.')
-        else:
+        elif not skips.named:
             print('No configured patterns matched.')
-    return 1 if any(not x for x in allowed) else 0
+    # Skips only exist in files mode. In text mode they are part of the report, otherwise they go to stderr.
+    for line in skips.summary():
+        print(line, file=sys.stdout if not (a.candidates or a.format == 'json') else sys.stderr)
+    if any(not x for x in allowed):
+        return 1
+    return EXIT_NOT_SCANNED if skips.named else 0
 
 
 if __name__ == '__main__':

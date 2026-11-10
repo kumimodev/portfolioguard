@@ -2,11 +2,12 @@
 
 ## Unreleased
 1. New files mode: `--files PATH...` scans files and directories without Git, so loose drafts outside a repository can be checked.
-2. Standard input scanning with `--stdin` or a `-` path, and `--stdin-name NAME` to label findings.
+2. Standard input scanning with `--stdin` or a `-` path, and `--stdin-name NAME` to label findings. Control characters in names are shown as `?`.
 3. Same rules, allowlist matching, text and JSON output, `--candidates` and exit codes as repo scans. Findings carry a `files` or `stdin` source label.
-4. Skips for size and binary files work as before. A skipped file or stdin that you named is reported on stderr instead of passing silently.
-5. The Git repository not found error now points to `--files` and `--stdin`. Scans inside a repository behave as before.
-6. Added tests for files and stdin scanning, allowlists, config, errors, and unchanged repository scans.
+4. A named file or stdin that is skipped (over the size cap, binary including UTF-16, or unreadable) is no longer presented as clean: stderr names it, stdout says it was not scanned, and the exit code is `3` unless there are findings, which still exit `1`.
+5. Files skipped inside directories are counted in the summary. FIFOs, sockets and devices inside a directory are skipped without being opened, so a scan can't hang on them. A named symlink is followed, a symlink found inside a directory is ignored.
+6. Repo scans behave as before. Two or more positional repository paths already exited `2` and still do, with a clearer message. Only the Git repository not found message gained a hint, and a lone `-` now means stdin.
+7. Added tests for files and stdin scanning, allowlists, config, errors, special files and unchanged repository scans.
 
 ## 0.3.1, 1 Nov 2026
 1. Ignore SVG coordinate data and LinkedIn activity or share URNs in phone number checks while keeping ordinary phone detection enabled.

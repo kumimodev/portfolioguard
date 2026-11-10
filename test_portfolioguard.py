@@ -3,7 +3,9 @@ import os
 import io
 import json
 import re
+import socket
 import subprocess
+import sys
 import tempfile
 import unittest
 from unittest.mock import patch
@@ -504,10 +506,12 @@ class FilesModeTests(unittest.TestCase):
 
     def test_stdin_binary_and_oversize_are_reported_not_silent(self):
         code, out, err = run_cli(['--stdin'], stdin=b'\0abc')
-        self.assertEqual(code, 0)
+        self.assertEqual(code, 3)
         self.assertIn('PortfolioGuard: skipped <stdin> (binary)', err)
+        self.assertIn('NOT SCANNED: 1 named input(s) were skipped', out)
+        self.assertNotIn('No configured patterns matched.', out)
         code, out, err = run_cli(['--stdin', '--max-bytes', '10'], stdin=LEAKY)
-        self.assertEqual(code, 0)
+        self.assertEqual(code, 3)
         self.assertIn('PortfolioGuard: skipped <stdin> (over size limit)', err)
 
     def test_allowlist_exact_and_glob(self):
@@ -566,11 +570,12 @@ class FilesModeTests(unittest.TestCase):
     def test_max_bytes_skip_of_named_file_is_reported(self):
         self.write('big.md', LEAKY)
         code, out, err = run_cli(['--files', 'big.md', '--max-bytes', '5'], cwd=self.dir)
-        self.assertEqual(code, 0)
+        self.assertEqual(code, 3)
         self.assertIn('PortfolioGuard: skipped big.md (over size limit)', err)
+        self.assertIn('NOT SCANNED: 1 named input(s) were skipped', out)
         self.write('bin.dat', b'\0' + LEAKY.encode())
         code, out, err = run_cli(['--files', 'bin.dat'], cwd=self.dir)
-        self.assertEqual(code, 0)
+        self.assertEqual(code, 3)
         self.assertIn('PortfolioGuard: skipped bin.dat (binary)', err)
 
     def test_errors_exit_two(self):
@@ -609,6 +614,132 @@ class FilesModeTests(unittest.TestCase):
         self.assertEqual((code, out), (2, ''))
         self.assertTrue(err.startswith('PortfolioGuard: Git repository not found'), err)
         self.assertIn('--files', err)
+
+    def test_utf16_named_file_is_not_reported_as_clean(self):
+        self.write('utf16.md', LEAKY.encode('utf-16'))
+        code, out, err = run_cli(['--files', 'utf16.md'], cwd=self.dir)
+        self.assertEqual(code, 3)
+        self.assertIn('skipped utf16.md (binary)', err)
+        self.assertNotIn('No configured patterns matched.', out)
+
+    def test_findings_win_over_not_scanned_exit_code(self):
+        self.write('b.md', LEAKY)
+        self.write('bin.dat', b'\0abc')
+        code, out, err = run_cli(['--files', 'b.md', 'bin.dat'], cwd=self.dir)
+        self.assertEqual(code, 1)
+        self.assertIn('Found 2 non-allowlisted issue(s)', out)
+        self.assertIn('NOT SCANNED: 1 named input(s)', out)
+
+    def test_not_scanned_notice_goes_to_stderr_for_json_and_candidates(self):
+        self.write('bin.dat', b'\0abc')
+        code, out, err = run_cli(['--files', 'bin.dat', '--format', 'json'], cwd=self.dir)
+        self.assertEqual((code, json.loads(out)), (3, []))
+        self.assertIn('NOT SCANNED', err)
+        code, out, err = run_cli(['--files', 'bin.dat', '--candidates'], cwd=self.dir)
+        self.assertEqual((code, out), (3, ''))
+        self.assertIn('NOT SCANNED', err)
+
+    def test_skips_inside_directories_are_counted(self):
+        self.write('d/ok.md', 'fine\n')
+        self.write('d/a.bin', b'\0abc')
+        self.write('d/b.bin', b'\0abc')
+        self.write('d/big.md', LEAKY)
+        code, out, err = run_cli(['--files', 'd', '--max-bytes', '20'], cwd=self.dir)
+        self.assertEqual(code, 0)
+        self.assertIn('No configured patterns matched.', out)
+        self.assertIn('Skipped 3 file(s) inside directories: 2 binary, 1 over size limit.', out)
+        self.assertEqual(err, '')
+
+    def test_stdin_name_control_characters_are_sanitised(self):
+        code, out, _ = run_cli(['--stdin', '--stdin-name', 'x\nFound 0 non-allowlisted issue(s) across 0 finding(s).\x1b[2J'], stdin=LEAKY)
+        self.assertEqual(code, 1)
+        for line in out.splitlines():
+            self.assertNotIn('\x1b', line)
+        self.assertEqual([x for x in out.splitlines() if x.startswith('Found ')], [x for x in out.splitlines() if x.startswith('Found 2 ')])
+        self.assertIn('stdin: x?Found 0 non-allowlisted issue(s) across 0 finding(s).?[2J:2 [email_address]', out)
+
+    def test_named_symlink_is_followed(self):
+        real = self.write('outside/real.md', LEAKY)
+        self.write('d/placeholder.md', 'fine\n')
+        try:
+            os.symlink(real, self.dir / 'd' / 'link.md')
+            os.symlink(self.dir / 'outside', self.dir / 'linkdir')
+        except (OSError, NotImplementedError):
+            self.skipTest('symlinks not available')
+        code, out, _ = run_cli(['--files', 'd/link.md'], cwd=self.dir)
+        self.assertEqual(code, 1)
+        self.assertIn('files: d/link.md:2 [email_address]', out)
+        code, out, _ = run_cli(['--files', 'linkdir'], cwd=self.dir)
+        self.assertEqual(code, 1)
+        self.assertIn('files: linkdir/real.md:2 [email_address]', out)
+
+    @unittest.skipUnless(hasattr(os, 'mkfifo'), 'mkfifo not available')
+    def test_fifo_inside_directory_does_not_hang(self):
+        self.write('d/a.md', LEAKY)
+        os.mkfifo(self.dir / 'd' / 'pipe')
+        script = Path(__file__).resolve().parent / 'portfolioguard.py'
+        try:
+            done = subprocess.run([sys.executable, str(script), '--files', 'd'], cwd=self.dir, timeout=20,
+                                  stdin=subprocess.DEVNULL, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+        except subprocess.TimeoutExpired:
+            self.fail('directory scan hung on a FIFO')
+        out = done.stdout.decode()
+        self.assertEqual(done.returncode, 1)
+        self.assertIn('files: d/a.md:2 [email_address]', out)
+        self.assertIn('Skipped 1 file(s) inside directories: 1 not a regular file.', out)
+
+    @unittest.skipUnless(hasattr(os, 'mkfifo'), 'mkfifo not available')
+    def test_named_fifo_and_devices_exit_two(self):
+        os.mkfifo(self.dir / 'pipe')
+        script = Path(__file__).resolve().parent / 'portfolioguard.py'
+        targets = ['pipe'] + (['/dev/null'] if os.path.exists('/dev/null') else [])
+        for target in targets:
+            with self.subTest(target=target):
+                try:
+                    done = subprocess.run([sys.executable, str(script), '--files', target], cwd=self.dir, timeout=20,
+                                          stdin=subprocess.DEVNULL, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+                except subprocess.TimeoutExpired:
+                    self.fail('named special file hung')
+                self.assertEqual(done.returncode, 2)
+                self.assertIn('Not a file or directory', done.stderr.decode())
+
+    @unittest.skipUnless(hasattr(socket, 'AF_UNIX'), 'unix sockets not available')
+    def test_socket_inside_directory_is_skipped(self):
+        self.write('d/a.md', 'fine\n')
+        sock = socket.socket(socket.AF_UNIX)
+        self.addCleanup(sock.close)
+        try:
+            sock.bind(str(self.dir / 'd' / 's'))
+        except OSError:
+            self.skipTest('cannot bind a unix socket here')
+        code, out, _ = run_cli(['--files', 'd'], cwd=self.dir)
+        self.assertEqual(code, 0)
+        self.assertIn('Skipped 1 file(s) inside directories: 1 not a regular file.', out)
+
+    @unittest.skipIf(hasattr(os, 'geteuid') and os.geteuid() == 0, 'root can read everything')
+    def test_unreadable_files_are_reported(self):
+        locked = self.write('d/locked.md', LEAKY)
+        self.write('d/ok.md', 'fine\n')
+        locked.chmod(0)
+        self.addCleanup(locked.chmod, 0o600)
+        code, out, err = run_cli(['--files', 'd'], cwd=self.dir)
+        self.assertEqual(code, 0)
+        self.assertIn('Skipped 1 file(s) inside directories: 1 unreadable.', out)
+        code, out, err = run_cli(['--files', 'd/locked.md'], cwd=self.dir)
+        self.assertEqual(code, 3)
+        self.assertIn('skipped d/locked.md (unreadable)', err)
+
+    def test_stdin_prompt_only_on_a_terminal(self):
+        class Tty(io.StringIO):
+            def isatty(self):
+                return True
+        out, err = io.StringIO(), io.StringIO()
+        with contextlib.redirect_stdout(out), contextlib.redirect_stderr(err), patch('sys.stdin', Tty('fine\n')):
+            code = main(['--stdin'])
+        self.assertEqual(code, 0)
+        self.assertIn('press Ctrl-D', err.getvalue())
+        code, out, err = run_cli(['--stdin'], stdin='fine\n')
+        self.assertEqual(err, '')
 
 
 class InRepoUnchangedTests(unittest.TestCase):
