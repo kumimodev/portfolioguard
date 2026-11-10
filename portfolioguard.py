@@ -161,6 +161,98 @@ class EmailPattern:
 
 
 
+_SECRET_KEYWORD_RE = re.compile(
+    r'(?i)(?:api[_-]?key|secret|password|passwd|token|client[_-]?secret)')
+_SECRET_SPACE_RE = re.compile(r'\s')
+_SECRET_ALNUM = frozenset(
+    'ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789'
+    '\u017f\u212a\u0130\u0131')
+_SECRET_VALUE = _SECRET_ALNUM | frozenset('_./+=-')
+_SECRET_QUOTE = frozenset('"\'')
+_SECRET_JOINER = frozenset('_-')
+_SECRET_ASSIGN = frozenset(':=')
+
+
+def search_secret(line, begin=0):
+    """First generic_secret_assignment hit at or after begin.
+
+    Same spans as the old quadratic regex, including its IGNORECASE folds.
+    """
+    n = len(line)
+    best = None
+    pos = begin
+    run_lo = run_hi = -1
+    # Advance one character after each hit so a keyword can be found inside
+    # a longer one, e.g. secret in xclient_secret=.
+    while True:
+        kw = _SECRET_KEYWORD_RE.search(line, pos)
+        if kw is None:
+            break
+        k0, k1 = kw.start(), kw.end()
+        pos = k0 + 1
+        # A later keyword at or after the current hit's keyword end sits after
+        # the assign character, so it cannot start earlier.
+        if best is not None and k0 >= best[3]:
+            break
+        j = k1
+        if j < n and line[j] in _SECRET_QUOTE:
+            j += 1
+        while j < n and _SECRET_SPACE_RE.match(line[j]):
+            j += 1
+        if j >= n or line[j] not in _SECRET_ASSIGN:
+            continue
+        j += 1
+        while j < n and _SECRET_SPACE_RE.match(line[j]):
+            j += 1
+        if j < n and line[j] in _SECRET_QUOTE:
+            j += 1
+        val = j
+        if run_lo <= val <= run_hi:
+            j = run_hi
+        else:
+            while j < n and line[j] in _SECRET_VALUE:
+                j += 1
+            run_lo, run_hi = val, j
+        if j - val < 8:
+            continue
+        end = j
+        name_pos = k0
+        while name_pos >= 2 and line[name_pos - 1] in _SECRET_JOINER and line[name_pos - 2] in _SECRET_ALNUM:
+            name_pos -= 1
+            name_pos -= 1
+            while name_pos > 0 and line[name_pos - 1] in _SECRET_ALNUM:
+                name_pos -= 1
+        name_start = name_pos
+        start = None
+        if name_start >= 1 and line[name_start - 1] in _SECRET_QUOTE:
+            if name_start - 1 == 0:
+                start = 0
+            elif line[name_start - 2] not in _SECRET_ALNUM:
+                start = name_start - 2
+        if start is None:
+            if name_start == 0:
+                start = 0
+            elif line[name_start - 1] not in _SECRET_ALNUM:
+                start = name_start - 1
+            else:
+                continue
+        cand = (start, end, k0, k1)
+        if best is None or cand[0] < best[0] or (cand[0] == best[0] and cand[2] > best[2]):
+            best = cand
+    if best is None:
+        return None
+    start, end = best[0], best[1]
+    return _EmailMatch(line[start:end], start, end)
+
+
+class SecretPattern:
+    """Linear matcher with the same hits as the old generic_secret_assignment regex."""
+
+    def search(self, line):
+        return search_secret(line)
+
+
+
 RULES = [
     ('private_key', ('-----' + 'BEGIN' + ' (?:RSA |EC |OPENSSH |DSA )?PRIVATE KEY-----')),
     ('aws_access_key', r'\b(?:AKIA|ASIA)[A-Z0-9]{16}\b'),
@@ -173,7 +265,7 @@ RULES = [
     ('stripe_secret_key', (r'\b(?:' + 'sk' + '_' + 'live' + '_|' + 'sk' + '_' + 'test' + '_|' + 'rk' + '_' + 'live' + '_|' + 'rk' + '_' + 'test' + r'_)[A-Za-z0-9]{16,}\b')),
     ('azure_connection_string', r'(?i)\b(?:AccountKey\s*=\s*[A-Za-z0-9+/=_-]{8,}|SharedAccessSignature\s*=\s*[^\s;]{8,})'),
     ('azure_shared_access_signature', r'(?i)\b(?:SharedAccessSignature\s+[A-Za-z0-9%&=;._+-]{12,}|sig=[A-Za-z0-9%._~-]{8,})'),
-    ('generic_secret_assignment', r"""(?i)(?:^|[^A-Za-z0-9])["']?(?:[A-Za-z0-9]+[_-])*(?:api[_-]?key|secret|password|passwd|token|client[_-]?secret)["']?\s*[:=]\s*["']?([A-Za-z0-9_./+=-]{8,})"""),
+    ('generic_secret_assignment', SecretPattern()),
     ('nric_fin', r'(?<![A-Za-z0-9])[STFGM]\d{7}[A-Z](?![A-Za-z0-9])'),
     ('mykad', r'(?<![A-Za-z0-9])(?:\d{6}-\d{2}-\d{4}|\d{12})(?![A-Za-z0-9])'),
     ('email_address', EmailPattern()),

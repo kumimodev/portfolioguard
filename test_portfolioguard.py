@@ -13,7 +13,7 @@ from unittest.mock import patch
 import shlex
 from pathlib import Path
 
-from portfolioguard import EmailPattern, install_hook, is_allowed, load_allowlist, main, profile_rules, scan
+from portfolioguard import EmailPattern, SecretPattern, install_hook, is_allowed, load_allowlist, main, profile_rules, scan
 
 
 def run_git(root, *args, **kwargs):
@@ -462,6 +462,126 @@ class EmailAddressTests(unittest.TestCase):
                 self.fail('allowed email rule hung on a 1MB repeated address line')
         self.assertEqual(done.returncode, 0)
         self.assertNotIn(b'[', done.stdout)
+
+
+class GenericSecretTests(unittest.TestCase):
+    LEGACY = re.compile(
+        r"""(?i)(?:^|[^A-Za-z0-9])["']?(?:[A-Za-z0-9]+[_-])*(?:api[_-]?key|secret|password|passwd|token|client[_-]?secret)["']?\s*[:=]\s*["']?([A-Za-z0-9_./+=-]{8,})""")
+
+    def _span(self, match):
+        return None if match is None else (match.group(), match.start(), match.end())
+
+    def test_generic_secret_matches_legacy_pattern(self):
+        pat = SecretPattern()
+        samples = [
+            '{"password": "test-secret-value"}',
+            'OPENAI_API_KEY=sk-exampleexampleexampleexample1234',
+            'slack_token=EXAMPLEfake-token-value',
+            '  token=12345678',
+            'tokenizer=abcdefgh',
+            'secretive=abcdefgh',
+            'password1=abcdefgh',
+            'xpassword=abcdefgh',
+            'api_key==abcdefgh',
+            'token = : abcdefgh',
+            'password="abcdefghijkl"',
+            'x"token"=abcdefgh',
+            ' {"password":"abcdefgh"}',
+            'foo=password=abcdefgh',
+            'my__token=abcdefgh',
+            'my_-token=abcdefgh',
+            'my-_token=abcdefgh',
+            '_token=abcdefgh',
+            '-token=abcdefgh',
+            '9token=abcdefgh',
+            'a_token=abcdefgh',
+            'a9_token=abcdefgh',
+            'passwordpassword=abcdefgh',
+            'secret_token=abcdefghijkl',
+            'token secret=abcdefgh',
+            'api_key_token=abcdefgh',
+            'my_token_password=abcdefgh',
+            'xclient_secret=abcdefgh',
+            'client_secret_api_key=abcdefgh',
+            'client_secret_token=abcdefgh',
+            'clientsecret=abcdefgh',
+            'api-key=abcdefgh',
+            'apikey=abcdefgh',
+            'passwd=abcdefgh',
+            'password=abcdefg',
+            'TOKEN=abcdefgh',
+            'foo_TOKEN=abcdefgh',
+            'foo_"token"=abcdefgh',
+            '"foo_token"=abcdefgh',
+            "x 'api_key' = abcdefgh",
+            'password=abcdefgh leftover',
+            'password=abcdefgh=xyz',
+            "password=''abcdefgh",
+            'password=""abcdefgh',
+            'password=  abcdefgh',
+            'password =abcdefgh',
+            'password: abcdefgh',
+            "password :'abcdefgh",
+            'export TOKEN="abcdefgh"',
+            'token-value=abcdefgh',
+            'notasecret=abcdefgh',
+            'the_secret=abcdefgh',
+            'a-a-a-a-a-token=abcdefgh',
+            'a_a_a_a_a_token=abcdefgh',
+            '\u017fecret=abcdefgh',
+            'pa\u017fsword=abcdefgh',
+            'to\u212aen=abcdefgh',
+            'api_\u212aey=abcdefgh',
+            'password=\u00a0abcdefgh',
+        ]
+        for text in samples:
+            with self.subTest(text=text):
+                self.assertEqual(self._span(self.LEGACY.search(text)), self._span(pat.search(text)))
+
+    def test_generic_secret_one_megabyte_hyphen_line_does_not_hang(self):
+        # Regression for a quadratic generic_secret_assignment pattern on a long
+        # hyphen or underscore run.
+        script = Path(__file__).resolve().parent / 'portfolioguard.py'
+        for unit in ('a-', 'a_'):
+            payload = unit * 500000
+            self.assertEqual(len(payload), 1_000_000)
+            with self.subTest(unit=unit):
+                try:
+                    done = subprocess.run(
+                        [sys.executable, str(script), '--stdin', '--max-bytes', '1000000'],
+                        input=payload.encode(), timeout=5,
+                        stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+                    )
+                except subprocess.TimeoutExpired:
+                    self.fail(f'generic_secret rule hung on a 1MB {unit!r} line')
+                self.assertEqual(done.returncode, 0)
+                self.assertNotIn(b'[', done.stdout)
+
+    def test_generic_secret_one_megabyte_keyword_repeats_do_not_hang(self):
+        # Regression for a quadratic value-run rescan on repeated keywords.
+        script = Path(__file__).resolve().parent / 'portfolioguard.py'
+        cases = (
+            ('password=', 1, True),
+            ('token=a', 1, True),
+            ('xpassword=', 0, False),
+        )
+        for unit, code, expect_hit in cases:
+            payload = (unit * (1_000_000 // len(unit) + 1))[:1_000_000]
+            self.assertEqual(len(payload), 1_000_000)
+            with self.subTest(unit=unit):
+                try:
+                    done = subprocess.run(
+                        [sys.executable, str(script), '--stdin', '--max-bytes', '1000000'],
+                        input=payload.encode(), timeout=5,
+                        stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+                    )
+                except subprocess.TimeoutExpired:
+                    self.fail(f'generic_secret rule hung on a 1MB {unit!r} line')
+                self.assertEqual(done.returncode, code)
+                if expect_hit:
+                    self.assertIn(b'[generic_secret_assignment]', done.stdout)
+                else:
+                    self.assertNotIn(b'[', done.stdout)
 
 
 AWS_LINE = 'key=' + 'AKIA' + 'EXAMPLEKEY123456'
