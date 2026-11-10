@@ -105,6 +105,85 @@ def scan(text, name, rules=RULES, source='working-tree'):
     return found
 
 
+def display_name(path):
+    return os.path.normpath(str(path)).replace(os.sep, '/')
+
+
+def skip_note(name, reason):
+    print(f'PortfolioGuard: skipped {name} ({reason})', file=sys.stderr)
+
+
+def read_text_file(path, name, max_bytes):
+    """Return decoded text for an explicitly named file, or None after a stderr note."""
+    try:
+        if path.stat().st_size > max_bytes:
+            skip_note(name, 'over size limit')
+            return None
+        data = path.read_bytes()
+    except OSError:
+        skip_note(name, 'unreadable')
+        return None
+    if not is_text(data):
+        skip_note(name, 'binary')
+        return None
+    return data.decode('utf-8', 'replace')
+
+
+def scan_paths(paths, rules, max_bytes=LIMIT, skip=None):
+    """Scan files and directories without Git. Names are the paths as given, normalised."""
+    dirs = SKIP if skip is None else skip
+    found, seen = [], set()
+    for arg in paths:
+        top = Path(arg)
+        if top.is_dir():
+            for folder, subdirs, names in os.walk(top):
+                subdirs[:] = sorted(d for d in subdirs if d not in dirs and not os.path.islink(os.path.join(folder, d)))
+                for filename in sorted(names):
+                    p = Path(folder, filename)
+                    rel = p.relative_to(top)
+                    if p.is_symlink() or skipped(rel, dirs):
+                        continue
+                    real = os.path.realpath(p)
+                    if real in seen:
+                        continue
+                    seen.add(real)
+                    try:
+                        if p.stat().st_size > max_bytes:
+                            continue
+                        data = p.read_bytes()
+                    except OSError:
+                        continue
+                    if is_text(data):
+                        found += scan(data.decode('utf-8', 'replace'), display_name(p), rules, 'files')
+        elif top.is_file():
+            real = os.path.realpath(top)
+            if real in seen:
+                continue
+            seen.add(real)
+            name = display_name(top)
+            text = read_text_file(top, name, max_bytes)
+            if text is not None:
+                found += scan(text, name, rules, 'files')
+        elif top.exists():
+            raise ValueError(f'Not a file or directory: {arg}')
+        else:
+            raise ValueError(f'Path not found: {arg}')
+    return found
+
+
+def scan_stdin(rules, name='<stdin>', max_bytes=LIMIT, stream=None):
+    stream = stream or sys.stdin
+    raw = getattr(stream, 'buffer', None)
+    data = raw.read(max_bytes + 1) if raw else stream.read(max_bytes + 1).encode('utf-8')
+    if len(data) > max_bytes:
+        skip_note(name, 'over size limit')
+        return []
+    if not is_text(data):
+        skip_note(name, 'binary')
+        return []
+    return scan(data.decode('utf-8', 'replace'), name, rules, 'stdin')
+
+
 def git(root, *args):
     return subprocess.run(['git', '-C', str(root), *args], stdout=subprocess.PIPE, stderr=subprocess.PIPE)
 
@@ -112,7 +191,7 @@ def git(root, *args):
 def get_root(path):
     r = git(path, 'rev-parse', '--show-toplevel')
     if r.returncode:
-        raise ValueError('Git repository not found')
+        raise ValueError('Git repository not found (use --files PATH... or --stdin to scan outside a git repo)')
     return Path(os.fsdecode(r.stdout.strip()))
 
 
@@ -318,7 +397,10 @@ def install_hook(root, force=False):
 
 def main(argv=None):
     p = argparse.ArgumentParser(description='Offline scan for likely secrets and personal data.')
-    p.add_argument('path', nargs='?', default='.')
+    p.add_argument('paths', nargs='*', metavar='path', help='Git repository to scan (default: .). With --files: files and directories to scan; - reads stdin')
+    p.add_argument('--files', action='store_true', help='Scan the given files and directories without Git')
+    p.add_argument('--stdin', action='store_true', help='Scan text from stdin without Git (same as a - path)')
+    p.add_argument('--stdin-name', default='<stdin>', metavar='NAME', help='Name shown in findings for stdin (default: <stdin>)')
     m = p.add_mutually_exclusive_group()
     m.add_argument('--staged', action='store_true')
     m.add_argument('--history', action='store_true')
@@ -334,8 +416,22 @@ def main(argv=None):
     p.add_argument('--expect-email', action='append', default=[], metavar='EMAIL',
                    help='In --history mode, allow this author/committer email (repeatable). Merges with expected_identities from config.')
     a = p.parse_args(argv)
+    use_stdin = a.stdin or '-' in a.paths
+    paths = [x for x in a.paths if x != '-']
+    outside_git = a.files or use_stdin
     try:
-        root = get_root(Path(a.path).resolve())
+        if outside_git:
+            clashes = [flag for flag, on in (('--staged', a.staged), ('--history', a.history), ('--pre-push', a.pre_push),
+                                             ('--range', a.revision_range), ('--install-hook', a.install_hook)) if on]
+            if clashes:
+                raise ValueError(f'--files / --stdin cannot be combined with {clashes[0]}')
+            if not paths and not use_stdin:
+                raise ValueError('--files needs at least one path (or --stdin / -)')
+            root = Path.cwd()
+        else:
+            if len(paths) > 1:
+                raise ValueError('Only one repository path is allowed (use --files to scan several paths)')
+            root = get_root(Path(paths[0] if paths else '.').resolve())
         if a.install_hook:
             hook = install_hook(root, a.force)
             print(f'Installed PortfolioGuard pre-push hook: {hook}')
@@ -384,7 +480,12 @@ def main(argv=None):
             max_bytes = a.max_bytes
         if max_bytes < 0:
             raise ValueError('--max-bytes / max_file_bytes must be non-negative')
-        found = pre_push(root, rules, max_bytes=max_bytes, skip=skip) if a.pre_push else commit_range(root, [a.revision_range], rules, max_bytes, skip) if a.revision_range else staged(root, rules, max_bytes, skip) if a.staged else history(root, rules, max_bytes, skip) if a.history else working(root, rules, max_bytes, skip)
+        if outside_git:
+            found = scan_paths(paths, rules, max_bytes, skip)
+            if use_stdin:
+                found += scan_stdin(rules, a.stdin_name, max_bytes)
+        else:
+            found = pre_push(root, rules, max_bytes=max_bytes, skip=skip) if a.pre_push else commit_range(root, [a.revision_range], rules, max_bytes, skip) if a.revision_range else staged(root, rules, max_bytes, skip) if a.staged else history(root, rules, max_bytes, skip) if a.history else working(root, rules, max_bytes, skip)
         if a.history and expected_identities:
             found += unexpected_commit_identities(root, expected_identities)
         allow_path = Path(a.allowlist).resolve() if a.allowlist else root / '.portfolioguard-allowlist'

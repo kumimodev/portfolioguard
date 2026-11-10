@@ -2,6 +2,7 @@ import contextlib
 import os
 import io
 import json
+import re
 import subprocess
 import tempfile
 import unittest
@@ -381,6 +382,287 @@ class ScannerTests(unittest.TestCase):
             self.assertIn('unexpected-commit-identity', body)
             self.assertIn('author:odd@example.com', body)
             self.assertNotIn('committer:dev@example.com', body)
+
+
+AWS_LINE = 'key=' + 'AKIA' + 'EXAMPLEKEY123456'
+MAIL_LINE = 'contact=' + 'alex' + '@' + 'example.test'
+LEAKY = 'clean intro\n' + MAIL_LINE + '\n' + AWS_LINE + '\n'
+
+
+def run_cli(args, stdin=None, cwd=None):
+    """Run main() and return (exit code, stdout, stderr)."""
+    out, err = io.StringIO(), io.StringIO()
+    old = os.getcwd()
+    stream = io.TextIOWrapper(io.BytesIO(stdin if isinstance(stdin, bytes) else (stdin or '').encode()), encoding='utf-8')
+    try:
+        if cwd:
+            os.chdir(cwd)
+        with contextlib.redirect_stdout(out), contextlib.redirect_stderr(err), patch('sys.stdin', stream):
+            code = main(args)
+    finally:
+        os.chdir(old)
+    return code, out.getvalue(), err.getvalue()
+
+
+class FilesModeTests(unittest.TestCase):
+    def setUp(self):
+        self._tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self._tmp.cleanup)
+        self.dir = Path(self._tmp.name)
+        self.assertNotEqual(subprocess.run(['git', '-C', str(self.dir), 'rev-parse'], stdout=subprocess.PIPE,
+                                           stderr=subprocess.PIPE).returncode, 0, 'fixture dir must be outside git')
+
+    def write(self, name, text):
+        path = self.dir / name
+        path.parent.mkdir(parents=True, exist_ok=True)
+        if isinstance(text, bytes):
+            path.write_bytes(text)
+        else:
+            path.write_text(text, encoding='utf-8')
+        return path
+
+    def test_clean_file_exits_zero(self):
+        clean = self.write('clean.md', 'Nothing to see here.\n')
+        code, out, err = run_cli(['--files', str(clean)])
+        self.assertEqual((code, out.strip(), err), (0, 'No configured patterns matched.', ''))
+
+    def test_leaky_file_same_format_and_rules_as_scan(self):
+        leaky = self.write('leaky.md', LEAKY)
+        code, out, err = run_cli(['--files', str(leaky)], cwd=self.dir)
+        self.assertEqual(code, 1)
+        name = leaky.as_posix()
+        self.assertIn(f'files: {name}:2 [email_address]\n', out)
+        self.assertIn(f'files: {name}:3 [aws_access_key]\n', out)
+        self.assertIn('Found 2 non-allowlisted issue(s) across 2 finding(s). Review locally before sharing.', out)
+        self.assertNotIn('AKIA', out)
+        self.assertNotIn('example.test', out)
+        expected = {(n, rule) for _, n, rule, _ in scan(LEAKY, 'x')}
+        shown = {(int(m[1]), m[2]) for m in (re.match(r'files: .+:(\d+) \[(\w+)\]$', x) for x in out.splitlines() if x.startswith('files:'))}
+        self.assertEqual(shown, expected)
+
+    def test_relative_path_name_is_normalised(self):
+        self.write('drafts/post.md', LEAKY)
+        code, out, _ = run_cli(['--files', './drafts/../drafts/post.md'], cwd=self.dir)
+        self.assertEqual(code, 1)
+        self.assertIn('files: drafts/post.md:2 [email_address]', out)
+
+    def test_multiple_paths(self):
+        self.write('a.md', 'fine\n')
+        self.write('b.md', LEAKY)
+        code, out, _ = run_cli(['--files', 'a.md', 'b.md', 'a.md'], cwd=self.dir)
+        self.assertEqual(code, 1)
+        self.assertIn('files: b.md:2 [email_address]', out)
+        self.assertNotIn('a.md', out)
+        code, out, _ = run_cli(['--files', 'a.md', 'a.md'], cwd=self.dir)
+        self.assertEqual(code, 0)
+
+    def test_directory_walk_skip_dirs_binary_and_stable_order(self):
+        self.write('drafts/z.md', LEAKY)
+        self.write('drafts/sub/a.md', LEAKY)
+        self.write('drafts/node_modules/dep/x.md', LEAKY)
+        self.write('drafts/build/y.md', LEAKY)
+        self.write('drafts/image.bin', b'\0\1\2' + LEAKY.encode())
+        code, out, _ = run_cli(['--files', 'drafts'], cwd=self.dir)
+        self.assertEqual(code, 1)
+        names = [x.split(' ')[1].rsplit(':', 1)[0] for x in out.splitlines() if x.startswith('files:')]
+        self.assertEqual(names, ['drafts/z.md', 'drafts/z.md', 'drafts/sub/a.md', 'drafts/sub/a.md'])
+        # a directory's own files come first, then its sorted sub directories
+        # naming a skipped directory explicitly still scans its own files
+        code, out, _ = run_cli(['--files', 'drafts/build'], cwd=self.dir)
+        self.assertIn('files: drafts/build/y.md:2 [email_address]', out)
+
+    def test_directory_walk_ignores_symlinks_and_dedupes(self):
+        real = self.write('real/a.md', LEAKY)
+        self.write('other/clean.md', 'fine\n')
+        try:
+            os.symlink(real, self.dir / 'other' / 'link.md')
+            os.symlink(self.dir / 'real', self.dir / 'other' / 'linkdir')
+        except (OSError, NotImplementedError):
+            self.skipTest('symlinks not available')
+        code, out, _ = run_cli(['--files', 'other'], cwd=self.dir)
+        self.assertEqual((code, out.strip()), (0, 'No configured patterns matched.'))
+        code, out, _ = run_cli(['--files', 'real', 'real/a.md'], cwd=self.dir)
+        self.assertEqual(out.count('files: real/a.md:2 [email_address]'), 1)
+
+    def test_stdin_flag_and_dash(self):
+        for args in (['--stdin'], ['-'], ['--files', '-']):
+            with self.subTest(args=args):
+                code, out, _ = run_cli(args, stdin=LEAKY)
+                self.assertEqual(code, 1)
+                self.assertIn('stdin: <stdin>:2 [email_address]\n', out)
+                self.assertIn('stdin: <stdin>:3 [aws_access_key]\n', out)
+                self.assertNotIn('AKIA', out)
+        code, out, _ = run_cli(['--stdin'], stdin='all good\n')
+        self.assertEqual((code, out.strip()), (0, 'No configured patterns matched.'))
+
+    def test_stdin_name_and_mixed_with_file(self):
+        self.write('b.md', LEAKY)
+        code, out, _ = run_cli(['--stdin', '--stdin-name', 'draft.md', 'b.md'], stdin=LEAKY, cwd=self.dir)
+        self.assertEqual(code, 1)
+        self.assertIn('files: b.md:2 [email_address]', out)
+        self.assertIn('stdin: draft.md:2 [email_address]', out)
+
+    def test_stdin_binary_and_oversize_are_reported_not_silent(self):
+        code, out, err = run_cli(['--stdin'], stdin=b'\0abc')
+        self.assertEqual(code, 0)
+        self.assertIn('PortfolioGuard: skipped <stdin> (binary)', err)
+        code, out, err = run_cli(['--stdin', '--max-bytes', '10'], stdin=LEAKY)
+        self.assertEqual(code, 0)
+        self.assertIn('PortfolioGuard: skipped <stdin> (over size limit)', err)
+
+    def test_allowlist_exact_and_glob(self):
+        self.write('b.md', LEAKY)
+        allow = self.write('allow.txt', 'b.md:2:email_address\n*.md:aws_access_key\n')
+        code, out, _ = run_cli(['--files', 'b.md', '--allowlist', str(allow)], cwd=self.dir)
+        self.assertEqual(code, 0)
+        self.assertIn('files: b.md:2 [email_address] [allowed]', out)
+        self.assertIn('files: b.md:3 [aws_access_key] [allowed]', out)
+        self.assertIn('Found 0 non-allowlisted issue(s) across 2 finding(s).', out)
+        partial = self.write('partial.txt', 'b.md:2:email_address\n')
+        code, out, _ = run_cli(['--files', 'b.md', '--allowlist', str(partial)], cwd=self.dir)
+        self.assertEqual(code, 1)
+        self.assertIn('Found 1 non-allowlisted issue(s)', out)
+
+    def test_default_allowlist_is_read_from_cwd(self):
+        self.write('b.md', LEAKY)
+        self.write('.portfolioguard-allowlist', 'b.md:email_address\nb.md:aws_access_key\n')
+        code, out, _ = run_cli(['--files', 'b.md'], cwd=self.dir)
+        self.assertEqual(code, 0)
+        self.assertIn('[allowed]', out)
+
+    def test_stdin_findings_can_be_allowlisted_by_name(self):
+        allow = self.write('allow.txt', '<stdin>:2:email_address\n<stdin>:aws_access_key\n')
+        code, out, _ = run_cli(['--stdin', '--allowlist', str(allow)], stdin=LEAKY)
+        self.assertEqual(code, 0)
+        self.assertIn('stdin: <stdin>:2 [email_address] [allowed]', out)
+
+    def test_json_and_candidates_output(self):
+        self.write('b.md', LEAKY)
+        code, out, _ = run_cli(['--files', 'b.md', '--format', 'json'], stdin=None, cwd=self.dir)
+        self.assertEqual(code, 1)
+        data = json.loads(out)
+        self.assertEqual({(x['source'], x['path'], x['line'], x['rule'], x['allowed']) for x in data},
+                         {('files', 'b.md', 2, 'email_address', False), ('files', 'b.md', 3, 'aws_access_key', False)})
+        self.assertNotIn('AKIA', out)
+        code, out, _ = run_cli(['--stdin', '--format', 'json'], stdin=LEAKY)
+        self.assertEqual({x['source'] for x in json.loads(out)}, {'stdin'})
+        code, out, _ = run_cli(['--files', 'b.md', '--candidates'], cwd=self.dir)
+        self.assertEqual(out.splitlines(), ['b.md:2:email_address', 'b.md:3:aws_access_key'])
+
+    def test_config_from_cwd_and_rules_flag(self):
+        self.write('b.md', 'CUSTOM-1234\n' + MAIL_LINE + '\n')
+        self.write('portfolioguard.toml', 'allowed_email_values = ["alex' + '@' + 'example.test"]\n'
+                   '[[rules]]\nname="custom_marker"\npattern="CUSTOM-[0-9]{4}"\n')
+        code, out, _ = run_cli(['--files', 'b.md'], cwd=self.dir)
+        self.assertEqual(code, 1)
+        self.assertIn('files: b.md:1 [custom_marker]', out)
+        self.assertNotIn('email_address', out)
+        other = self.write('other.toml', '[[rules]]\nname="other_marker"\npattern="CUSTOM-[0-9]{4}"\n')
+        code, out, _ = run_cli(['--files', 'b.md', '--rules', str(other)], cwd=self.dir)
+        self.assertIn('[other_marker]', out)
+        self.assertNotIn('[custom_marker]', out)
+        self.assertIn('email_address', out)
+
+    def test_max_bytes_skip_of_named_file_is_reported(self):
+        self.write('big.md', LEAKY)
+        code, out, err = run_cli(['--files', 'big.md', '--max-bytes', '5'], cwd=self.dir)
+        self.assertEqual(code, 0)
+        self.assertIn('PortfolioGuard: skipped big.md (over size limit)', err)
+        self.write('bin.dat', b'\0' + LEAKY.encode())
+        code, out, err = run_cli(['--files', 'bin.dat'], cwd=self.dir)
+        self.assertEqual(code, 0)
+        self.assertIn('PortfolioGuard: skipped bin.dat (binary)', err)
+
+    def test_errors_exit_two(self):
+        self.write('a.md', 'fine\n')
+        cases = [
+            ['--files', 'missing.md'],
+            ['--files'],
+            ['--files', 'a.md', '--history'],
+            ['--stdin', '--staged'],
+            ['--files', 'a.md', '--range', 'HEAD~1..HEAD'],
+            ['--files', 'a.md', '--pre-push'],
+            ['--files', 'a.md', '--install-hook'],
+            ['a.md', 'b.md'],
+        ]
+        for args in cases:
+            with self.subTest(args=args):
+                code, out, err = run_cli(args, stdin='', cwd=self.dir)
+                self.assertEqual(code, 2)
+                self.assertEqual(out, '')
+                self.assertTrue(err.startswith('PortfolioGuard: '), err)
+        code, _, err = run_cli(['--files', 'missing.md'], cwd=self.dir)
+        self.assertIn('Path not found: missing.md', err)
+
+    def test_files_mode_never_runs_git(self):
+        self.write('b.md', LEAKY)
+        boom = AssertionError('git must not be called in files mode')
+        with patch('portfolioguard.git', side_effect=boom), patch('portfolioguard.subprocess.run', side_effect=boom):
+            code, out, _ = run_cli(['--files', 'b.md'], cwd=self.dir)
+            self.assertEqual(code, 1)
+            code, out, _ = run_cli(['--stdin'], stdin=LEAKY)
+            self.assertEqual(code, 1)
+
+    def test_default_mode_outside_git_still_exits_two(self):
+        self.write('b.md', LEAKY)
+        code, out, err = run_cli([str(self.dir)])
+        self.assertEqual((code, out), (2, ''))
+        self.assertTrue(err.startswith('PortfolioGuard: Git repository not found'), err)
+        self.assertIn('--files', err)
+
+
+class InRepoUnchangedTests(unittest.TestCase):
+    def make_repo(self, tmp):
+        repo = Path(tmp)
+        subprocess.run(['git', 'init', '-q', str(repo)], check=True)
+        run_git(repo, 'config', 'user.email', 'fixture@example.test')
+        run_git(repo, 'config', 'user.name', 'Fixture')
+        (repo / 'tracked.md').write_text(LEAKY)
+        (repo / 'clean.md').write_text('fine\n')
+        run_git(repo, 'add', '.')
+        run_git(repo, 'commit', '-m', 'fixture')
+        return repo
+
+    def test_default_scan_still_reports_working_tree(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            repo = self.make_repo(tmp)
+            (repo / 'untracked.md').write_text(LEAKY)
+            code, out, err = run_cli([str(repo)])
+            self.assertEqual(code, 1)
+            self.assertIn('working-tree: tracked.md:2 [email_address]', out)
+            self.assertIn('working-tree: untracked.md:3 [aws_access_key]', out)
+            self.assertNotIn('files:', out)
+            self.assertEqual(err, '')
+            # no argument means the current directory
+            code, out, _ = run_cli([], cwd=repo)
+            self.assertIn('working-tree: tracked.md:2 [email_address]', out)
+
+    def test_files_mode_inside_repo_scans_only_named_files(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            repo = self.make_repo(tmp)
+            (repo / 'untracked.md').write_text(LEAKY)
+            code, out, _ = run_cli(['--files', 'clean.md'], cwd=repo)
+            self.assertEqual((code, out.strip()), (0, 'No configured patterns matched.'))
+            code, out, _ = run_cli(['--files', 'untracked.md'], cwd=repo)
+            self.assertEqual(code, 1)
+            self.assertIn('files: untracked.md:2 [email_address]', out)
+            self.assertNotIn('tracked.md:', out.replace('untracked.md:', ''))
+
+    def test_history_and_staged_still_work(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            repo = self.make_repo(tmp)
+            code, out, _ = run_cli([str(repo), '--history'])
+            self.assertEqual(code, 1)
+            self.assertRegex(out, r'history:[0-9a-f]{8}: tracked\.md:2 \[email_address\]')
+            (repo / 'clean.md').write_text('still fine\n')
+            run_git(repo, 'add', 'clean.md')
+            code, out, _ = run_cli([str(repo), '--staged'])
+            self.assertEqual((code, out.strip()), (0, 'No configured patterns matched.'))
+
+    def test_two_repo_paths_are_an_error_without_files(self):
+        code, _, err = run_cli(['.', '..'])
+        self.assertEqual(code, 2)
+        self.assertIn('Only one repository path is allowed', err)
 
 
 
