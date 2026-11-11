@@ -79,7 +79,7 @@ faulthandler.dump_traceback_later({SELF_LIMIT_SECONDS}, exit=True)
 try:
     import resource
     resource.setrlimit(resource.RLIMIT_CPU, ({SELF_LIMIT_SECONDS + 5}, {SELF_LIMIT_SECONDS + 5}))
-except ImportError:
+except (ImportError, ValueError, OSError):
     pass
 '''
 

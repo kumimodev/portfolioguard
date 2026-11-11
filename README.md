@@ -6,6 +6,30 @@
 
 Offline Python helper that looks through a Git repo for things that look like secrets or personal data before you push. It runs on your machine only (no network) and prints the file, line and rule name. It never prints the matched text itself. Handy as a second look, but a clean run is **not** a guarantee that nothing sensitive is in there.
 
+## For hiring managers
+
+PortfolioGuard is a small offline tool I built to catch secrets and personal data in a Git repo before I push. It runs only on the machine you point it at, so nothing is sent over the network. I use it on my own public work. The tests and the GitHub Actions workflow in this repo show how it behaves.
+
+A repo can look fine and still hold an API key, a personal email or a national ID number in an old commit, a skipped folder or a file that's too big to scan. I wanted a second look I could run myself, with a clear report, rather than hoping I hadn't missed something. This is a personal tool I maintain, not a commercial product.
+
+How to read a result:
+
+1. Each finding names the source (working tree, history, a file or stdin), the path, the line number and the rule, for example `working-tree: sample.txt:1 [generic_secret_assignment]`. The matched text is never printed, so a log or screenshot of the report does not leak the secret again.
+2. Exit code `0` means nothing outside the allowlist turned up. That is still not a guarantee the repo is clean. Skipped folders, files over the size cap, and binary files are not scanned.
+3. Exit code `1` means something needs a look. Exit code `2` means the scan or install couldn't run. In files mode, exit code `3` means something you asked for was not scanned.
+
+A short example from a throwaway repo with one made up secret and one made up email in `sample.txt`:
+
+```text
+$ python portfolioguard.py .
+working-tree: sample.txt:1 [generic_secret_assignment]
+working-tree: sample.txt:2 [email_address]
+
+Found 2 non-allowlisted issue(s) across 2 finding(s). Review locally before sharing.
+```
+
+The first line is a made up secret assignment. The second is a made up email. In real use I'd open those lines, fix or allowlist what I meant to publish, and scan again.
+
 ## Requirements
 
 Python 3.11+ and Git.
